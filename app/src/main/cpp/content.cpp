@@ -97,13 +97,23 @@ std::string documentation() {
 A small, native ARM64 workbench.
 Write a program, tap Assemble, then Run. Tap the editor's line-number gutter to toggle a breakpoint. Step executes one instruction. Run resumes a paused program; Reset assembles a fresh state. Your current draft is saved automatically, and Projects stores named programs. Export writes a .s file using Android's file picker.
 
+EXECUTION MODES
+
+Slow: execute one instruction at a time at 1–30 instructions per second. Select Slow above the workspace and drag the speed slider. Run opens Inspect, where the highlighted row shows the last executed instruction while running. Pausing highlights the next instruction instead. Speed changes take effect while running; Android scheduling can make the actual rate slightly lower.
+
+Default: the original execution behavior, up to 12000 instructions per batch followed by a 16 ms delay. Each batch also has an approximately 8 ms time budget. Use this for interactive framebuffer programs.
+
+Fast: execute continuous batches at the maximum available VM throughput, with no deliberate delay between ordinary batches. The UI is sampled about 30 times per second. Each batch retains the 8 ms time budget so input and Pause remain responsive. An explicit svc #3 still presents and waits for the next frame.
+
+All modes preserve breakpoints, checked memory, and the one-million-instruction safety pause. Switching modes or adjusting the slider preserves registers, memory, and instruction count. Step always executes exactly one instruction. Mode and slow-speed preferences are saved on this device.
+
 EXECUTION MODEL
 
 This is a documented ARM64 subset, not a Linux environment or a general-purpose ELF loader. The instruction library is the exact supported surface. Unsupported instructions and directives are rejected. There is no network, filesystem, OS syscall, or raw machine-code directive available to guest programs.
 
 Arithmetic, bit operations, comparisons, and scalar floating-point instructions execute as real ARM64 instructions on your phone. The C++ dispatcher checks and handles guest memory, branches, large immediate/address pseudo-instructions, SP arithmetic, and VM calls. Native snippets are generated from an allowlist of encodings, with host state preserved; guest addresses never become host pointers. Generated code changes from writable to read/execute before use. Guest code cannot modify it.
 
-Execution yields to Android every frame. After 1,000,000 instructions the VM pauses, including loops that present frames; tap Run to continue. Pause is always available. Out-of-bounds reads/writes, bad branch addresses, invalid calls, and assembly errors become visible diagnostics. This is an in-process educational sandbox, not a security boundary for adversarial binaries.
+Execution yields to Android between bounded batches in every speed mode. After 1,000,000 instructions the VM pauses, including loops that present frames; tap Run to continue. Pause is always available. Out-of-bounds reads/writes, bad branch addresses, invalid calls, and assembly errors become visible diagnostics. This is an in-process educational sandbox, not a security boundary for adversarial binaries.
 
 REGISTERS & STARTUP
 
@@ -178,10 +188,42 @@ Float & stack: native float math, conversions, a function call, and stack pairs.
 
 DEBUGGING
 
+Inspect shows up to seven assembled instructions around the highlighted row, with source line numbers, virtual addresses, and breakpoint dots. Nearby rows are source context, not a history of executed branches. While Slow mode runs, the highlight follows the instruction just executed. At a pause or breakpoint it marks the next instruction, before execution; a fault marks the failing instruction. On completion it keeps the last executed instruction visible. Pausing from the execution controls and hitting a breakpoint open Inspect automatically. Editing hides this context until the new source is assembled.
+
 Breakpoint dots bind to source line numbers; edits clear them to avoid stopping on a different statement. A breakpoint pauses before execution. Run skips the current breakpoint once, then observes subsequent visits. Step ignores breakpoints for one instruction. Registers and memory stay inspectable after faults. Editing stops the current program and marks it for reassembly. Build errors are shown below the editor and the relevant source line is underlined in red.
 
 Font sizes for editor and docs are independent under Settings. App colors follow Android's light/dark setting. No account or internet permission is needed.
 )DOC";
+}
+std::vector<ManualSection> manualSections() {
+    const std::vector<std::pair<std::string, std::string>> headings = {
+        {"ARM STUDIO / FIELD GUIDE", "Getting started"},
+        {"EXECUTION MODES", "Execution modes"},
+        {"EXECUTION MODEL", "Execution model"},
+        {"REGISTERS & STARTUP", "Registers & startup"},
+        {"COMPLETE MEMORY MAP · LITTLE ENDIAN", "Memory map"},
+        {"INPUT REGISTERS", "Input registers"},
+        {"VM CALLS · svc #number", "VM calls"},
+        {"FRAMEBUFFER FORMATS", "Framebuffer formats"},
+        {"ASSEMBLER SYNTAX", "Assembler syntax"},
+        {"EXAMPLES", "Examples"},
+        {"DEBUGGING", "Debugging"}};
+    const auto all = documentation();
+    std::vector<ManualSection> sections;
+    for (size_t n = 0; n < headings.size(); ++n) {
+        const auto start = all.find(headings[n].first + "\n\n");
+        if (start == std::string::npos)
+            continue;
+        const auto from = start + headings[n].first.size() + 2;
+        const auto end =
+            n + 1 == headings.size() ? all.size() : all.find(headings[n + 1].first + "\n\n", from);
+        auto body = all.substr(from, end == std::string::npos ? end : end - from);
+        const auto last = body.find_last_not_of("\r\n ");
+        if (last != std::string::npos)
+            body.resize(last + 1);
+        sections.push_back({headings[n].second, body});
+    }
+    return sections;
 }
 std::string example(int index) {
     switch (index) {

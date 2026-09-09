@@ -41,6 +41,15 @@ struct Instruction {
     bool pre = false, post = false, sign = false;
     std::string text;
 };
+struct InstructionLocation {
+    uint64_t address;
+    int line;
+    bool current, breakpoint;
+    std::string text;
+};
+struct ManualSection {
+    std::string title, body;
+};
 class Engine {
   public:
     Context ctx{};
@@ -62,6 +71,7 @@ class Engine {
     int currentLine() const;
     std::vector<int32_t> pixels() const;
     std::vector<int32_t> cells() const;
+    std::vector<InstructionLocation> instructionWindow(bool lastExecuted = false) const;
 
   private:
     void *jit = nullptr;
@@ -69,6 +79,7 @@ class Engine {
     int cursorX = 0, cursorY = 0, fg = 7, bg = 0;
     std::string escape;
     bool skipBreakpoint = false;
+    uint64_t lastPc = UINT64_MAX;
     uint64_t readReg(int r, int width = 8) const;
     void writeReg(int r, uint64_t v, int width = 8);
     void check(uint64_t addr, int bytes, bool write) const;
@@ -81,5 +92,6 @@ class Engine {
 };
 std::string instructionCatalog();
 std::string documentation();
+std::vector<ManualSection> manualSections();
 std::string example(int index);
 } // namespace armstudio

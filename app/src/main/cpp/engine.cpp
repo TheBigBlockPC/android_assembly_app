@@ -226,6 +226,7 @@ std::string Engine::assemble(const std::string &source, bool executable) {
     ctx = {};
     sp = RAM_END;
     pc = count = 0;
+    lastPc = UINT64_MAX;
     mode = 0;
     halted = true;
     paused = false;
@@ -865,7 +866,9 @@ void Engine::run(int budget, bool single) {
                 break;
             }
             skip = false;
+            const uint64_t executingPc = pc;
             execute(code[pc / 4]);
+            lastPc = executingPc;
             count++;
             std::memcpy(mem.data() + INPUT + 24, &count, 8);
             if (!halted && pc == code.size() * 4) {
@@ -902,6 +905,27 @@ void Engine::stop() {
 }
 int Engine::currentLine() const {
     return pc / 4 < code.size() ? code[pc / 4].line : 0;
+}
+std::vector<InstructionLocation> Engine::instructionWindow(bool lastExecuted) const {
+    std::vector<InstructionLocation> rows;
+    if (code.empty())
+        return rows;
+    const bool fault = status.starts_with("Fault");
+    uint64_t focus =
+        ((lastExecuted && !paused && !fault) || (halted && !fault)) && lastPc != UINT64_MAX ? lastPc
+                                                                                            : pc;
+    if (focus % 4 != 0 || focus / 4 >= code.size())
+        return rows;
+    const size_t center = focus / 4;
+    // Keep up to seven actual instructions visible, even at the start/end of the program.
+    size_t begin = center > 3 ? center - 3 : 0;
+    size_t end = std::min(code.size(), begin + 7);
+    if (end - begin < 7 && end > 7)
+        begin = end - 7;
+    for (size_t n = begin; n < end; ++n)
+        rows.push_back(
+            {n * 4, code[n].line, n == center, breaks.count(code[n].line) != 0, code[n].text});
+    return rows;
 }
 void Engine::input(int key, bool down, int x, int y, bool touch) {
     uint32_t values[6] = {(uint32_t)key,

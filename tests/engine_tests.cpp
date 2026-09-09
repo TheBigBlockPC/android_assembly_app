@@ -166,6 +166,92 @@ int main() {
         reject("b nowhere");
         reject(".data\n.space 9999999999999");
         reject("mov x0, #1\n.data\nvalue: .ascii \"abc");
+        // V2: the displayed source location must follow branches and preserve stopped/fault state.
+        e.breaks.clear();
+        compile(e, ".text\n_start:\nmov x0, #1\nb target\nnop\nnop\nnop\nnop\nnop\ntarget:\nadd "
+                   "x0, x0, #1\nhlt #0\nnop");
+        auto window = e.instructionWindow();
+        check(window.size() == 7 && window[0].current && window[0].line == 3 &&
+                  window[0].address == 0,
+              "Context starts at the actual entry instruction");
+        e.run(1);
+        window = e.instructionWindow(true);
+        check(window[0].current && window[0].line == 3, "Slow mode shows just-executed source");
+        e.run(1);
+        window = e.instructionWindow(true);
+        check(window[1].current && window[1].text == "b target",
+              "Slow context identifies executed branch, not target");
+        e.stop();
+        window = e.instructionWindow(true);
+        int current = 0;
+        for (const auto &row : window)
+            if (row.current)
+                current = row.line;
+        check(current == 11 && window.size() == 7,
+              "Pause switches context to the next instruction");
+        e.breaks = {11};
+        e.run(1);
+        window = e.instructionWindow();
+        bool breakpoint = false;
+        for (const auto &row : window)
+            if (row.current)
+                breakpoint = row.line == 11 && row.breakpoint;
+        check(e.paused && breakpoint && e.count == 2, "Context marks breakpoint before execution");
+        e.run(1, true);
+        e.run(1, true);
+        window = e.instructionWindow();
+        current = 0;
+        for (const auto &row : window)
+            if (row.current)
+                current = row.line;
+        check(e.halted && current == 12, "Halt in middle of code retains halted instruction");
+        e.breaks.clear();
+        compile(e, "mov x0, #0\nstr x1, [x0]\nnop");
+        e.run(100);
+        window = e.instructionWindow(true);
+        check(e.status.starts_with("Fault") && window[1].current && window[1].line == 2,
+              "Fault context remains at the failing instruction, not the previous instruction");
+        compile(e, "nop");
+        e.run(1);
+        window = e.instructionWindow();
+        check(e.halted && window.size() == 1 && window[0].current,
+              "End-of-code context keeps last instruction");
+        compile(e, "nop\nnop");
+        check(e.instructionWindow(true)[0].current && e.count == 0,
+              "Reset clears execution history");
+
+        const std::string paced =
+            "mov x0, #0\nmov x1, #1500\nloop: add x0, x0, #1\nsubs x1, x1, #1\nb.ne loop\nhlt #0";
+        for (int budget : {1, 12000, 2147483647}) {
+            compile(e, paced);
+            while (!e.halted)
+                e.run(budget);
+            check(e.ctx.x[0] == 1500 && e.count == 4503,
+                  "Slow/default/fast batches preserve identical results and ticks");
+            compile(e, "loop: b loop");
+            while (!e.paused)
+                e.run(budget);
+            check(e.count == 1000000, "Safety limit remains exact at every execution speed");
+        }
+        compile(e, "svc #3\nmov x0, #42\nhlt #0");
+        e.run(2147483647);
+        check(e.yielded && e.count == 1 && e.ctx.x[0] == 0, "Fast batches honor explicit present");
+
+        auto sections = manualSections();
+        check(sections.size() == 11, "Manual exposes all eleven topics");
+        std::set<std::string> titles;
+        for (const auto &section : sections) {
+            check(titles.insert(section.title).second && !section.body.empty(),
+                  "Unique nonempty manual topics");
+            check(documentation().find(section.body) != std::string::npos,
+                  "Manual content remains intact");
+        }
+        check(sections[4].title == "Memory map" &&
+                  sections[4].body.find("0x00150020") != std::string::npos,
+              "Complete memory map retained");
+        check(sections[6].title == "VM calls" &&
+                  sections[6].body.find("#5  TICKS") != std::string::npos,
+              "All custom calls retained");
         // Every reference template should assemble after placeholder labels are supplied.
         std::istringstream lines(instructionCatalog());
         std::string row;

@@ -32,6 +32,19 @@ public class MainActivity extends Activity {
     FrameView frame;
     EditText address;
     Button runButton, playButton;
+    static final int SLOW = 0, DEFAULT = 1, FAST = 2;
+    int executionMode = DEFAULT, slowRate = 5;
+    long lastRefresh;
+    Button inspectRunButton;
+    final ArrayList<Button> modeButtons = new ArrayList<>();
+    LinearLayout slowControls, instructionRows, manualContent;
+    TextView speedLabel, instructionHeading;
+    SeekBar speedSlider;
+    ScrollView inspectScroll;
+    EditText manualSearch;
+    Spinner manualTopics;
+    int inspectorLine = 0;
+    String instructionSignature = "";
     String project = "Hello world", source = "", lintError = "";
     boolean changing = false, dirty = true, running = false, destroyed = false;
     int generation = 0, memoryAddress = 0x10000;
@@ -47,12 +60,29 @@ public class MainActivity extends Activity {
         public void run() {
             if (!running || destroyed)
                 return;
-            Native.run(12000, false);
+            long started = SystemClock.uptimeMillis();
+            Native.run(executionMode == SLOW   ? 1
+                       : executionMode == FAST ? Integer.MAX_VALUE
+                                               : 12000,
+                       false);
             if (Native.state() != 0)
                 running = false;
-            refresh();
-            if (running)
-                handler.postDelayed(this, 16);
+            // Fast mode spends its time executing, not rebuilding inspector rows each batch.
+            if (!running || executionMode != FAST || Native.yielded() ||
+                SystemClock.uptimeMillis() - lastRefresh >= 33)
+                refresh();
+            if (!running && Native.state() == 1) {
+                showTab(2);
+                inspectScroll.smoothScrollTo(0, 0);
+            }
+            if (running) {
+                long delay =
+                    executionMode == SLOW
+                        ? Math.max(1, 1000 / slowRate - (SystemClock.uptimeMillis() - started))
+                    : executionMode == DEFAULT || Native.yielded() ? 16
+                                                                   : 0;
+                handler.postDelayed(this, delay);
+            }
         }
     };
     final Runnable lintTask = () -> {
@@ -84,6 +114,8 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("studio", 0);
         editorSize = prefs.getInt("editorSize", 14);
         docsSize = prefs.getInt("docsSize", 15);
+        executionMode = Math.max(SLOW, Math.min(FAST, prefs.getInt("executionMode", DEFAULT)));
+        slowRate = Math.max(1, Math.min(30, prefs.getInt("slowRate", 5)));
         project = prefs.getString("project", "Hello world");
         source = prefs.getString("draft", Native.example(0));
         boolean dark = (getResources().getConfiguration().uiMode &
@@ -137,6 +169,7 @@ public class MainActivity extends Activity {
         statusView.setGravity(Gravity.CENTER_VERTICAL);
         statusRow.addView(statusView, new LinearLayout.LayoutParams(0, dp(36), 1));
         root.addView(statusRow);
+        buildExecutionControls();
         body = col();
         root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
         nav = row();
@@ -221,6 +254,72 @@ public class MainActivity extends Activity {
         gap(p, 16);
         return t;
     }
+    void buildExecutionControls() {
+        LinearLayout modes = row();
+        String[] names = {"Slow", "Default", "Fast"};
+        for (int n = 0; n < names.length; ++n) {
+            final int mode = n;
+            Button b = button(names[n], false);
+            b.setContentDescription(names[n] + " execution mode");
+            b.setOnClickListener(v -> setExecutionMode(mode));
+            modeButtons.add(b);
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(36), 1);
+            p.setMargins(0, 0, dp(5), dp(10));
+            modes.addView(b, p);
+        }
+        root.addView(modes);
+        slowControls = col();
+        speedLabel = text("", 11, muted);
+        slowControls.addView(speedLabel);
+        speedSlider = new SeekBar(this);
+        speedSlider.setMax(29);
+        speedSlider.setProgress(slowRate - 1);
+        speedSlider.setContentDescription("Slow execution speed, instructions per second");
+        speedSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar slider, int progress, boolean user) {
+                slowRate = progress + 1;
+                updateExecutionControls();
+                prefs.edit().putInt("slowRate", slowRate).apply();
+                if (running && executionMode == SLOW) {
+                    handler.removeCallbacks(tick);
+                    handler.postDelayed(tick, 1000 / slowRate);
+                }
+            }
+            public void onStartTrackingTouch(SeekBar s) {}
+            public void onStopTrackingTouch(SeekBar s) {}
+        });
+        slowControls.addView(speedSlider, new LinearLayout.LayoutParams(-1, dp(36)));
+        root.addView(slowControls);
+        updateExecutionControls();
+    }
+    void updateExecutionControls() {
+        for (int n = 0; n < modeButtons.size(); ++n) {
+            Button b = modeButtons.get(n);
+            b.setBackground(shape(n == executionMode ? accent : raised, 0, 10));
+            b.setTextColor(n == executionMode ? bg : ink);
+            b.setSelected(n == executionMode);
+        }
+        slowControls.setVisibility(executionMode == SLOW ? View.VISIBLE : View.GONE);
+        speedLabel.setText(slowRate +
+                           (slowRate == 1 ? " instruction / second" : " instructions / second"));
+    }
+    void setExecutionMode(int mode) {
+        executionMode = Math.max(SLOW, Math.min(FAST, mode));
+        prefs.edit().putInt("executionMode", executionMode).apply();
+        updateExecutionControls();
+        if (running) {
+            handler.removeCallbacks(tick);
+            handler.postDelayed(tick, executionMode == SLOW ? 1000 / slowRate : 0);
+            if (executionMode == SLOW)
+                showTab(2);
+        }
+        refresh();
+    }
+    void pauseAndInspect() {
+        pause();
+        showTab(2);
+        inspectScroll.smoothScrollTo(0, 0);
+    }
     void buildEditor() {
         editorPage = col();
         projectTitle = section(project, "ARM64  /  .s     •     Local draft", editorPage);
@@ -229,7 +328,7 @@ public class MainActivity extends Activity {
         runButton = button("▶ Run", true);
         runButton.setOnClickListener(v -> {
             if (running)
-                pause();
+                pauseAndInspect();
             else
                 start(true);
         });
@@ -351,8 +450,8 @@ public class MainActivity extends Activity {
                               off + instructionOffset + words.end(1), 33);
             }
             Matcher tokens = Pattern
-                                 .compile("\\b(?:[xw][0-9]+|[ds][0-9]+|sp|lr|fp|[xw]zr)\\b|#(?:-?" +
-                                          "0x[0-9a-fA-F]+|-?[0-9]+)|\"(?:\\\\.|[^\"\\\\])*\"")
+                                 .compile("\\b(?:[xw][0-9]+|[ds][0-9]+|sp|lr|fp|[xw]zr)\\b|#(?:-?"
+                                          + "0x[0-9a-fA-F]+|-?[0-9]+)|\"(?:\\\\.|[^\"\\\\])*\"")
                                  .matcher(code);
             while (tokens.find())
                 e.setSpan(new ForegroundColorSpan(
@@ -507,7 +606,7 @@ public class MainActivity extends Activity {
         playButton = button("▶ Run", true);
         playButton.setOnClickListener(v -> {
             if (running)
-                pause();
+                pauseAndInspect();
             else
                 start(false);
         });
@@ -675,17 +774,33 @@ public class MainActivity extends Activity {
     void buildInspect() {
         inspectPage = col();
         section("Under the hood", "Live registers and deterministic virtual memory", inspectPage);
-        LinearLayout toolbar = row();
+        inspectRunButton = button("▶ Run", true);
+        inspectRunButton.setOnClickListener(v -> {
+            if (running)
+                pauseAndInspect();
+            else
+                start(false);
+        });
         Button step = button("Step →", false);
         step.setOnClickListener(v -> step());
-        Button refresh = button("Refresh", false);
-        refresh.setOnClickListener(v -> refresh());
-        controls(inspectPage, step, refresh);
+        Button reset = button("Reset", false);
+        reset.setOnClickListener(v -> assemble());
+        controls(inspectPage, inspectRunButton, step, reset);
         gap(inspectPage, 12);
-        ScrollView scroll = new ScrollView(this);
+        inspectScroll = new ScrollView(this);
         LinearLayout inner = col();
-        scroll.addView(inner);
-        inspectPage.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        inspectScroll.addView(inner);
+        inspectPage.addView(inspectScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        instructionHeading = text("Assemble to see instruction context", 12, accent);
+        inner.addView(instructionHeading);
+        gap(inner, 8);
+        instructionRows = col();
+        instructionRows.setBackground(shape(surface, border, 12));
+        instructionRows.setPadding(dp(8), dp(6), dp(8), dp(6));
+        inner.addView(instructionRows);
+        gap(inner, 6);
+        inner.addView(text("Source line · virtual address · instruction", 10, muted));
+        gap(inner, 20);
         inner.addView(text("MEMORY", 10, accent));
         gap(inner, 8);
         LinearLayout addr = row();
@@ -749,6 +864,57 @@ public class MainActivity extends Activity {
         inner.addView(registerView);
         gap(inner, 12);
     }
+    void refreshInstructions() {
+        String[] rows =
+            dirty ? new String[0] : Native.instructions(running && executionMode == SLOW);
+        String state = dirty ? "Draft" : Native.status();
+        String prefix = state.startsWith("Fault")          ? "Faulting instruction"
+                        : Native.state() == 2              ? "Stopped after"
+                        : running && executionMode == SLOW ? "Just executed"
+                                                           : "Next instruction";
+        String signature = prefix + Arrays.toString(rows);
+        if (signature.equals(instructionSignature))
+            return;
+        instructionSignature = signature;
+        instructionRows.removeAllViews();
+        inspectorLine = 0;
+        instructionHeading.setText(dirty ? "Assemble to see instruction context"
+                                         : "No instruction context");
+        for (String row : rows) {
+            String[] fields = row.split("\\t", 5);
+            if (fields.length != 5)
+                continue;
+            boolean current = fields[0].equals("1"), breakpoint = fields[1].equals("1");
+            int line = Integer.parseInt(fields[2]);
+            LinearLayout lineRow = col();
+            lineRow.setPadding(dp(8), dp(5), dp(8), dp(5));
+            if (current) {
+                inspectorLine = line;
+                instructionHeading.setText(prefix + " · line " + line);
+                lineRow.setBackground(shape(raised, 0, 8));
+            }
+            LinearLayout meta = row();
+            TextView markerView = text(current      ? "▶ "
+                                       : breakpoint ? "● "
+                                                    : "  ",
+                                       10, breakpoint ? error : accent);
+            meta.addView(markerView);
+            TextView location =
+                text(String.format(Locale.ROOT, "L%-4d  %08X%s", line, Long.parseLong(fields[3]),
+                                   breakpoint ? "  • breakpoint" : ""),
+                     10, current ? accent : muted);
+            location.setTypeface(Typeface.MONOSPACE);
+            meta.addView(location);
+            lineRow.addView(meta);
+            TextView instruction = text(fields[4], Math.min(editorSize, 16), current ? ink : muted);
+            instruction.setTypeface(Typeface.MONOSPACE);
+            instruction.setPadding(dp(14), dp(2), 0, 0);
+            lineRow.addView(instruction);
+            lineRow.setContentDescription((current ? prefix + ". " : "") + "Line " + line + ". " +
+                                          fields[4]);
+            instructionRows.addView(lineRow);
+        }
+    }
     void buildGuide() {
         guidePage = col();
         section("Field guide", "Instruction reference, VM calls, and the memory map", guidePage);
@@ -770,16 +936,106 @@ public class MainActivity extends Activity {
             manual.setTextColor(bg);
             reference.setBackground(shape(raised, 0, 12));
             reference.setTextColor(ink);
-            guideBody.removeAllViews();
-            ScrollView scroll = new ScrollView(this);
-            TextView docs = text(Native.docs(), docsSize, ink);
-            docs.setLineSpacing(dp(4), 1);
-            docs.setTextIsSelectable(true);
-            docs.setPadding(dp(8), dp(8), dp(8), dp(24));
-            scroll.addView(docs);
-            guideBody.addView(scroll);
+            manualGuide(guideBody);
         });
         instructionGuide(guideBody);
+    }
+    void manualGuide(LinearLayout parent) {
+        parent.removeAllViews();
+        ArrayList<String[]> sections = new ArrayList<>();
+        ArrayList<String> topics = new ArrayList<>();
+        topics.add("All topics");
+        for (String row : Native.manual()) {
+            String[] section = row.split("\\t", 2);
+            sections.add(section);
+            topics.add(section[0]);
+        }
+        manualSearch = new EditText(this);
+        manualSearch.setSingleLine(true);
+        manualSearch.setTextSize(docsSize);
+        manualSearch.setTextColor(ink);
+        manualSearch.setHintTextColor(muted);
+        manualSearch.setHint("Search all manual topics…");
+        parent.addView(manualSearch, new LinearLayout.LayoutParams(-1, dp(48)));
+        manualTopics = new Spinner(this);
+        manualTopics.setContentDescription("VM manual topic");
+        setupSpinner(manualTopics, topics.toArray(new String[0]));
+        manualTopics.setSelection(1);
+        parent.addView(manualTopics, new LinearLayout.LayoutParams(-1, dp(44)));
+        ScrollView scroll = new ScrollView(this);
+        manualContent = col();
+        scroll.addView(manualContent);
+        parent.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        Runnable render = () -> {
+            manualContent.removeAllViews();
+            String query = manualSearch.getText().toString().trim().toLowerCase(Locale.ROOT);
+            int selected = manualTopics.getSelectedItemPosition();
+            int found = 0;
+            for (int n = 0; n < sections.size(); ++n) {
+                String[] section = sections.get(n);
+                if (query.isEmpty() && selected > 0 && selected != n + 1)
+                    continue;
+                boolean titleMatch = section[0].toLowerCase(Locale.ROOT).contains(query);
+                if (!titleMatch && !section[1].toLowerCase(Locale.ROOT).contains(query))
+                    continue;
+                ++found;
+                TextView heading = text(section[0], docsSize + 5, accent);
+                heading.setTypeface(null, Typeface.BOLD);
+                heading.setPadding(dp(4), dp(16), dp(4), dp(12));
+                manualContent.addView(heading);
+                for (String paragraph : section[1].split("\\n\\n")) {
+                    if (!titleMatch && !paragraph.toLowerCase(Locale.ROOT).contains(query))
+                        continue;
+                    // Address maps, VM calls and example lists become individually readable
+                    // entries.
+                    for (String entry :
+                         paragraph.split("\\n(?=0x|#[0-5]  |Hello world:|Color field:|Touch " +
+                                         "canvas:|Keyboard echo:|Float & stack:)")) {
+                        LinearLayout card = col();
+                        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+                        card.setBackground(shape(surface, border, 12));
+                        Matcher label = Pattern.compile("^(0x[^ ]+|#[0-5])  +(.+)$", Pattern.DOTALL)
+                                            .matcher(entry);
+                        if (label.matches()) {
+                            TextView name =
+                                text(label.group(1).startsWith("#") ? "svc " + label.group(1)
+                                                                    : label.group(1),
+                                     docsSize, accent);
+                            name.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                            card.addView(name);
+                            gap(card, 8);
+                            entry = label.group(2).replaceAll(" {2,}", " · ");
+                        }
+                        TextView content = text(entry, docsSize, ink);
+                        content.setLineSpacing(dp(4), 1);
+                        content.setTextIsSelectable(true);
+                        card.addView(content);
+                        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+                        layout.bottomMargin = dp(8);
+                        manualContent.addView(card, layout);
+                    }
+                }
+            }
+            if (found == 0)
+                manualContent.addView(text("No matching manual topics.", docsSize, muted));
+            scroll.scrollTo(0, 0);
+        };
+        manualSearch.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                render.run();
+            }
+            public void afterTextChanged(Editable e) {}
+        });
+        manualTopics.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (manualSearch.length() > 0)
+                    manualSearch.setText("");
+                render.run();
+            }
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        render.run();
     }
     void instructionGuide(LinearLayout parent) {
         parent.removeAllViews();
@@ -906,7 +1162,10 @@ public class MainActivity extends Activity {
         if ((dirty || Native.state() == 2) && !assemble())
             return;
         running = true;
-        if (machine)
+        if (executionMode == SLOW) {
+            showTab(2);
+            inspectScroll.smoothScrollTo(0, 0);
+        } else if (machine)
             showTab(1);
         handler.removeCallbacks(tick);
         handler.post(tick);
@@ -922,6 +1181,7 @@ public class MainActivity extends Activity {
             runButton.setText("▶ Run");
         if (playButton != null)
             playButton.setText("▶ Run");
+        refresh();
     }
     void step() {
         pause();
@@ -933,6 +1193,7 @@ public class MainActivity extends Activity {
     void refresh() {
         if (statusView == null)
             return;
+        lastRefresh = SystemClock.uptimeMillis();
         String s = dirty ? "Draft · assemble to run" : Native.status();
         statusView.setText("  " + s);
         statusView.setTextColor(s.startsWith("Fault") ? error : muted);
@@ -940,6 +1201,8 @@ public class MainActivity extends Activity {
             runButton.setText(running ? "Ⅱ Pause" : "▶ Run");
         if (playButton != null)
             playButton.setText(running ? "Ⅱ Pause" : "▶ Run");
+        if (inspectRunButton != null)
+            inspectRunButton.setText(running ? "Ⅱ Pause" : "▶ Run");
         if (gutter != null)
             gutter.invalidate();
         if (tab == 1 && frame != null) {
@@ -950,6 +1213,7 @@ public class MainActivity extends Activity {
             console.setText(out.isEmpty() ? "Output appears here." : out);
         }
         if (tab == 2 && memoryView != null) {
+            refreshInstructions();
             memoryView.setText(Native.memory(memoryAddress));
             registerView.setText(Native.registers());
         }

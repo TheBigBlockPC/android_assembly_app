@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.Instrumentation;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
@@ -11,6 +12,8 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.TextView;
+import java.io.FileOutputStream;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -61,6 +64,22 @@ public class SmokeInstrumentation extends Instrumentation {
             }
         return null;
     }
+    String allText(View view) {
+        StringBuilder result = new StringBuilder();
+        if (view instanceof TextView)
+            result.append(((TextView)view).getText()).append("\n");
+        if (view instanceof ViewGroup)
+            for (int n = 0; n < ((ViewGroup)view).getChildCount(); ++n)
+                result.append(allText(((ViewGroup)view).getChildAt(n)));
+        return result.toString();
+    }
+    void capture(String name) throws Exception {
+        Bitmap bitmap = getUiAutomation().takeScreenshot();
+        if (bitmap != null)
+            try (FileOutputStream out = getTargetContext().openFileOutput(name, 0)) {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+            }
+    }
     @Override
     public void onCreate(Bundle args) {
         super.onCreate(args);
@@ -76,6 +95,7 @@ public class SmokeInstrumentation extends Instrumentation {
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             activity = (MainActivity)startActivitySync(intent);
             waitForIdle();
+            main(() -> activity.setExecutionMode(MainActivity.DEFAULT));
             source(Native.example(0));
             main(() -> {
                 activity.runButton.performClick();
@@ -137,6 +157,10 @@ public class SmokeInstrumentation extends Instrumentation {
             main(() -> {
                 check(Native.status().startsWith("Breakpoint"), "Run hits editor breakpoint");
                 check(Native.line() == 2, "Breakpoint source line");
+                check(activity.tab == 2 && activity.inspectorLine == 2,
+                      "Breakpoint automatically opens the current source instruction");
+                check(allText(activity.instructionRows).contains("add x0, x0, #1"),
+                      "Inspector includes actual instruction text");
                 activity.step();
                 check(Native.line() == 3, "Step advances one line");
             });
@@ -147,6 +171,9 @@ public class SmokeInstrumentation extends Instrumentation {
                 check(Native.status().startsWith("Fault"),
                       "Bad memory access safely faults in app");
                 activity.showTab(2);
+                check(activity.inspectorLine == 2 &&
+                          activity.instructionHeading.getText().toString().startsWith("Faulting"),
+                      "Inspector marks the faulting source instruction");
                 check(activity.registerView.getText().length() > 0,
                       "App remains usable after fault");
             });
@@ -195,6 +222,103 @@ public class SmokeInstrumentation extends Instrumentation {
                 Button manual = findButton(activity.guidePage, "VM manual");
                 manual.performClick();
                 check(activity.guidePage.getChildCount() > 0, "VM manual renders");
+            });
+            // V2 execution controls and inspector state must agree before/after each pause.
+            source("mov x0, #0\nloop:\nadd x0, x0, #1\nb loop\n");
+            main(() -> {
+                activity.modeButtons.get(MainActivity.SLOW).performClick();
+                activity.speedSlider.setProgress(0);
+                check(activity.slowControls.getVisibility() == View.VISIBLE &&
+                          activity.slowRate == 1,
+                      "Slow mode exposes a 1 instruction/second slider");
+                activity.runButton.performClick();
+                check(activity.tab == 2, "Slow Run opens Inspect");
+            });
+            Thread.sleep(200);
+            main(() -> {
+                check(Native.count() == 1,
+                      "Slow execution advances one instruction before next interval");
+                check(activity.inspectorLine == 1 &&
+                          activity.instructionHeading.getText().toString().startsWith(
+                              "Just executed"),
+                      "Slow inspector follows the last executed instruction");
+                activity.inspectRunButton.performClick();
+                check(!activity.running && Native.state() == 1 && activity.inspectorLine == 3,
+                      "Pause immediately shows next instruction, accounting for labels");
+                check(
+                    activity.instructionHeading.getText().toString().startsWith("Next instruction"),
+                    "Paused context is explicitly before execution");
+            });
+            capture("v2-inspector.png");
+            main(() -> {
+                activity.step();
+                check(Native.count() == 2 && activity.inspectorLine == 4,
+                      "Step refreshes source context");
+                activity.speedSlider.setProgress(19);
+                check(activity.slowRate == 20 && prefs.getInt("slowRate", 0) == 20,
+                      "Slider speed persists");
+                activity.start(false);
+            });
+            Thread.sleep(220);
+            final long[] count = new long[1];
+            main(() -> {
+                check(Native.count() > 2 && Native.count() < 30,
+                      "Higher slow rate advances without resetting");
+                count[0] = Native.count();
+                activity.modeButtons.get(MainActivity.FAST).performClick();
+                check(Native.count() == count[0] && activity.running,
+                      "Changing speed preserves live state");
+                check(activity.slowControls.getVisibility() == View.GONE &&
+                          prefs.getInt("executionMode", -1) == MainActivity.FAST,
+                      "Fast mode selection persists and hides slow slider");
+            });
+            Thread.sleep(60);
+            main(() -> {
+                activity.pauseAndInspect();
+                check(Native.count() > count[0] + 100 && !activity.running && Native.state() == 1,
+                      "Fast mode advances rapidly and remains pausable");
+                check(activity.inspectorLine == Native.line(),
+                      "Fast pause shows precise next instruction");
+                count[0] = Native.count();
+                String registers = Native.registers();
+                activity.setExecutionMode(MainActivity.DEFAULT);
+                check(Native.registers().equals(registers),
+                      "Changing modes while paused preserves all registers");
+            });
+            Thread.sleep(100);
+            main(() -> {
+                check(Native.count() == count[0], "No queued execution continues after Pause");
+                activity.showTab(3);
+                findButton(activity.guidePage, "VM manual").performClick();
+                check(activity.manualTopics.getCount() == 12,
+                      "Manual provides eleven topics and all-topics view");
+                activity.manualTopics.setSelection(5);
+            });
+            waitForIdle();
+            main(() -> {
+                String content = allText(activity.manualContent);
+                check(content.contains("Memory map") && content.contains("0x00150020"),
+                      "Memory topic keeps full map");
+                check(activity.manualContent.getChildCount() >= 10,
+                      "Memory map is split into readable entry cards");
+            });
+            capture("v2-manual.png");
+            main(() -> {
+                activity.manualSearch.setText("RGB565");
+                check(allText(activity.manualContent).contains("Framebuffer formats"),
+                      "Manual search finds content across topics");
+                activity.manualSearch.setText("no_such_manual_entry_123");
+                check(allText(activity.manualContent).contains("No matching"),
+                      "Manual search has an empty state");
+                activity.manualSearch.setText("");
+                check(allText(activity.manualContent).contains("Memory map"),
+                      "Clearing search restores selected topic");
+            });
+            source("nop\n");
+            main(() -> {
+                activity.showTab(2);
+                check(activity.instructionRows.getChildCount() == 0 && activity.inspectorLine == 0,
+                      "Editing hides stale assembled source context");
             });
             source("nop\n");
             main(() -> {

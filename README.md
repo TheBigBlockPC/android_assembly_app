@@ -1,12 +1,28 @@
 # ARM Studio
 
-An offline Android ARM64 assembly workbench implemented from [spec.md](spec.md). The assembler, VM, debugger state, memory, graphics formats, ANSI parser, examples, and reference content are C++. A Java Android UI provides the editor, native controls, and framebuffer display.
+An offline Android ARM64 assembly workbench implemented from [spec.md](spec.md) and [specv2_improvements.md](specv2_improvements.md). The assembler, VM, debugger state, memory, graphics formats, ANSI parser, examples, and reference content are C++. A Java Android UI provides the editor, native controls, and framebuffer display.
 
 ## Use
 
-Open **ARM Studio** on the phone. The default project is Hello world. **Assemble** validates and resets the VM; **Run** executes and opens Machine; **Step** executes one instruction. Tap line numbers to set breakpoints. **Inspect** shows registers and memory. **Guide** contains searchable instructions with purpose/type filters, and the complete VM manual.
+Open **ARM Studio** on the phone. The default project is Hello world. **Assemble** validates and resets the VM; **Run** executes and opens Machine; **Step** executes one instruction. Tap line numbers to set breakpoints. **Inspect** shows registers and memory. **Guide** contains searchable instructions with purpose/type filters, and the complete VM manual organized into eleven searchable topics. Memory ranges, input registers, and VM calls are displayed as individual reference cards.
 
 The top-right menu contains five examples, named project saving/opening, `.s` import/export through Android's file picker, and separate editor/documentation font settings. Drafts persist automatically; switching projects also saves the previous source under `Autosave — <project>`. Colors follow the system light/dark setting.
+
+## Execution modes and inspector (v2)
+
+Select a mode above the workspace. Mode and speed preferences persist on the device; changing them keeps the current VM state.
+
+| Mode | Behavior |
+|---|---|
+| **Slow** | One instruction at a time, with a **1–30 instructions/second** slider. Run opens Inspect. The actual rate may be slightly lower due to UI scheduling. |
+| **Default** | Original pacing: up to 12000 instructions / approximately 8 ms per batch, followed by a 16 ms delay. |
+| **Fast** | Continuous batches at the maximum available VM throughput, with no deliberate inter-batch delay. Each batch retains the time budget; UI updates are limited to roughly 30 Hz. An explicit `svc #3` still yields for a frame. |
+
+Every mode keeps memory checks, breakpoints, and the one-million-instruction safety pause. Step always executes exactly one instruction, independent of mode.
+
+The inspector shows up to seven nearby **assembled instructions**, with original source line numbers, virtual addresses, and breakpoint markers. During Slow execution the highlighted row is the instruction just executed. At a pause/breakpoint it is the next instruction, before execution; after a fault it is the failing instruction; on completion it remains on the last executed instruction. Nearby rows show source order, not branch history. Editing hides old context until reassembly.
+
+Pausing from the execution controls and hitting a breakpoint open Inspect automatically. Run/Pause, Step, and Reset are available directly in Inspect.
 
 ## Build and install
 
@@ -32,7 +48,7 @@ This is a documented **ARM64 subset**, not a Linux process, full GNU assembler, 
 
 C++ dispatches bounds-checked loads/stores, branches, virtual stack operations, large immediate/address pseudo-instructions, and custom `svc #0` through `svc #5`. Guest addresses never become host pointers. Guest SP never replaces host SP. The trampoline preserves host callee-saved registers, Android x18, SIMD state required by the ABI, and the FP environment. Generated code is writable while being constructed, then read/execute while running.
 
-Execution batches yield after 12000 instructions or approximately 8 ms, checked every 32 instructions. `svc #3` yields immediately. Every million instructions pauses for explicit continuation, including loops that present frames. This keeps runaway or expensive programs stoppable. Memory faults, invalid branches, and assembler errors are reported inside the app. Source is capped at 256 KiB, code at 8192 instructions, expressions at 1024 characters, and print calls/transcript at 32768 bytes.
+Default execution batches yield after 12000 instructions or approximately 8 ms, checked every 32 instructions. Fast removes the instruction-per-batch cap and delay but keeps this time budget. Slow executes one instruction per interval. `svc #3` yields immediately in all modes. Every million instructions pauses for explicit continuation, including loops that present frames. This keeps runaway or expensive programs stoppable. Memory faults, invalid branches, and assembler errors are reported inside the app. Source is capped at 256 KiB, code at 8192 instructions, expressions at 1024 characters, and print calls/transcript at 32768 bytes.
 
 The VM is an in-process educational environment; it is not claimed as an audited security boundary for hostile binaries. SIMD vector operations, atomics, arbitrary system registers, logical immediates, extended/register-offset memory forms, macros, and Linux calls are intentionally unsupported. Floating point supports scalar S/D registers. Terminal glyphs are ASCII, with ANSI color/cursor/clear support.
 
@@ -87,7 +103,7 @@ adb shell am instrument -w dev.armstudio.test/dev.armstudio.SmokeInstrumentation
 
 Validated on Pixel 10 Pro:
 
-- **171 native checks:** integer and float results, host/guest registers, NZCV, memory indexing and sign extension, stack/calls, all five examples, ANSI cells, RGB565/RGB888, touch and keyboard registers, breakpoints/steps, loop limits, bounds violations, forbidden calls/directives, and every instruction-reference template.
-- **26 UI integration checks:** Run navigation and output, display aspect ratio, memory/register panels, completion insertion, valid-label and invalid-mnemonic lint, gutter breakpoints, stepping, fault recovery, real framebuffer touch events, virtual keyboard events, both guide panels, and draft preservation after assembly.
+- **223 native checks:** integer and float results, host/guest registers, NZCV, memory indexing and sign extension, stack/calls, all five examples, ANSI cells, RGB565/RGB888, touch and keyboard registers, breakpoints/steps, loop limits, bounds violations, forbidden calls/directives, every instruction-reference template, precise source context across branches/pauses/faults/completion, equivalent results and safety limits across all three batch sizes, and all eleven manual topics.
+- **51 UI integration checks:** Run navigation and output, display aspect ratio, memory/register panels, completion insertion, valid-label and invalid-mnemonic lint, gutter breakpoints, stepping, fault recovery, real framebuffer touch events, virtual keyboard events, both guide panels, draft preservation after assembly, adjustable Slow pacing, live mode changes without state loss, Fast pause responsiveness, automatic breakpoint inspection, source-context invalidation after edits, manual topic navigation, and cross-topic search.
 - Android lint: **no errors**. Remaining warnings concern English-only programmatic strings, intentional ARM64-only support, source-editor LTR layout, backup configuration guidance, and virtual-key accessibility.
-- Screens visually inspected in both system light and dark modes. The original system theme was restored.
+- V1 screens were inspected in both system light and dark modes. V2 inspector and manual screens were captured and visually inspected on the device. UI instrumentation restores the original draft/project/settings preferences after testing.

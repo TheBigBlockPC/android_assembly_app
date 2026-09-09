@@ -51,6 +51,26 @@ extern "C" JNIEXPORT jint JNICALL Java_dev_armstudio_Native_line(JNIEnv *, jclas
 extern "C" JNIEXPORT jint JNICALL Java_dev_armstudio_Native_mode(JNIEnv *, jclass) {
     return engine().mode;
 }
+extern "C" JNIEXPORT jboolean JNICALL Java_dev_armstudio_Native_yielded(JNIEnv *, jclass) {
+    return engine().yielded;
+}
+extern "C" JNIEXPORT jlong JNICALL Java_dev_armstudio_Native_count(JNIEnv *, jclass) {
+    return engine().count;
+}
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_dev_armstudio_Native_instructions(JNIEnv *e, jclass, jboolean lastExecuted) {
+    auto rows = engine().instructionWindow(lastExecuted);
+    auto result = e->NewObjectArray(rows.size(), e->FindClass("java/lang/String"), nullptr);
+    for (size_t n = 0; n < rows.size(); ++n) {
+        const auto &r = rows[n];
+        auto value =
+            js(e, std::to_string(r.current) + "\t" + std::to_string(r.breakpoint) + "\t" +
+                      std::to_string(r.line) + "\t" + std::to_string(r.address) + "\t" + r.text);
+        e->SetObjectArrayElement(result, n, value);
+        e->DeleteLocalRef(value);
+    }
+    return result;
+}
 extern "C" JNIEXPORT jstring JNICALL Java_dev_armstudio_Native_status(JNIEnv *e, jclass) {
     return js(e, engine().status);
 }
@@ -84,6 +104,16 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_armstudio_Native_catalog(JNIEnv *e
 }
 extern "C" JNIEXPORT jstring JNICALL Java_dev_armstudio_Native_docs(JNIEnv *e, jclass) {
     return js(e, documentation());
+}
+extern "C" JNIEXPORT jobjectArray JNICALL Java_dev_armstudio_Native_manual(JNIEnv *e, jclass) {
+    auto sections = manualSections();
+    auto result = e->NewObjectArray(sections.size(), e->FindClass("java/lang/String"), nullptr);
+    for (size_t n = 0; n < sections.size(); ++n) {
+        auto value = js(e, sections[n].title + "\t" + sections[n].body);
+        e->SetObjectArrayElement(result, n, value);
+        e->DeleteLocalRef(value);
+    }
+    return result;
 }
 extern "C" JNIEXPORT jstring JNICALL Java_dev_armstudio_Native_example(JNIEnv *e, jclass, jint n) {
     return js(e, example(n));
