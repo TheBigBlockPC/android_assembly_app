@@ -233,6 +233,11 @@ int main() {
                 e.run(budget);
             check(e.count == 1000000, "Safety limit remains exact at every execution speed");
         }
+        compile(e, paced);
+        while (!e.halted)
+            e.run(2147483647, false, false);
+        check(e.ctx.x[0] == 1500 && e.count == 4503,
+              "Untimed batches preserve identical results and ticks");
         compile(e, "svc #3\nmov x0, #42\nhlt #0");
         e.run(2147483647);
         check(e.yielded && e.count == 1 && e.ctx.x[0] == 0, "Fast batches honor explicit present");

@@ -63,7 +63,7 @@ class Engine {
     Engine();
     ~Engine();
     std::string assemble(const std::string &, bool executable = true);
-    void run(int budget, bool single = false);
+    void run(int budget, bool single = false, bool timeLimited = true);
     void stop();
     void input(int key, bool down, int x, int y, bool touch);
     std::string registers() const;

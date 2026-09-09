@@ -843,7 +843,7 @@ void Engine::execute(const Instruction &i) {
     }
     pc = next;
 }
-void Engine::run(int budget, bool single) {
+void Engine::run(int budget, bool single, bool timeLimited) {
     if (halted)
         return;
     paused = false;
@@ -889,7 +889,7 @@ void Engine::run(int budget, bool single) {
             }
             if (yielded)
                 break;
-            if ((j & 31) == 31 && std::chrono::steady_clock::now() >= deadline)
+            if (timeLimited && (j & 31) == 31 && std::chrono::steady_clock::now() >= deadline)
                 break;
         }
         if (!halted && !paused)

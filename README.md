@@ -92,6 +92,16 @@ The native suite is cross-compiled and executed on a connected ARM64 Android dev
 
 Override `ANDROID_SDK_ROOT` and/or `ANDROID_NDK_HOME` if needed. The script compiles a standalone native executable, pushes it to `/data/local/tmp/armstudio-engine-tests`, and runs it.
 
+Throughput is measured on the device with the same cross-compile toolchain; `dispatch` enforces the 8 ms time budget, `fast` removes it (`run(budget, false, false)`):
+
+```bash
+NDK="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+"$NDK/aarch64-linux-android28-clang++" -std=c++20 -O2 -static-libstdc++ -Wl,-z,max-page-size=16384 \
+    -Iapp/src/main/cpp tests/benchmark.cpp app/src/main/cpp/engine.cpp \
+    app/src/main/cpp/content.cpp app/src/main/cpp/trampoline.S -o build/tests/benchmark
+adb push build/tests/benchmark /data/local/tmp/armstudio-benchmark && adb shell /data/local/tmp/armstudio-benchmark
+```
+
 Device UI tests use a dependency-free Instrumentation runner. They temporarily exercise test programs and restore existing draft/project preferences in `finally`:
 
 ```bash
@@ -103,7 +113,7 @@ adb shell am instrument -w dev.armstudio.test/dev.armstudio.SmokeInstrumentation
 
 Validated on Pixel 10 Pro:
 
-- **223 native checks:** integer and float results, host/guest registers, NZCV, memory indexing and sign extension, stack/calls, all five examples, ANSI cells, RGB565/RGB888, touch and keyboard registers, breakpoints/steps, loop limits, bounds violations, forbidden calls/directives, every instruction-reference template, precise source context across branches/pauses/faults/completion, equivalent results and safety limits across all three batch sizes, and all eleven manual topics.
+- **225 native checks:** integer and float results, host/guest registers, NZCV, memory indexing and sign extension, stack/calls, all five examples, ANSI cells, RGB565/RGB888, touch and keyboard registers, breakpoints/steps, loop limits, bounds violations, forbidden calls/directives, every instruction-reference template, precise source context across branches/pauses/faults/completion, equivalent results and safety limits across all three batch sizes and the untimed path, and all eleven manual topics.
 - **51 UI integration checks:** Run navigation and output, display aspect ratio, memory/register panels, completion insertion, valid-label and invalid-mnemonic lint, gutter breakpoints, stepping, fault recovery, real framebuffer touch events, virtual keyboard events, both guide panels, draft preservation after assembly, adjustable Slow pacing, live mode changes without state loss, Fast pause responsiveness, automatic breakpoint inspection, source-context invalidation after edits, manual topic navigation, and cross-topic search.
 - Android lint: **no errors**. Remaining warnings concern English-only programmatic strings, intentional ARM64-only support, source-editor LTR layout, backup configuration guidance, and virtual-key accessibility.
 - V1 screens were inspected in both system light and dark modes. V2 inspector and manual screens were captured and visually inspected on the device. UI instrumentation restores the original draft/project/settings preferences after testing.
