@@ -5,7 +5,10 @@ public final class Native {
     }
     public static native String assemble(String source);
     public static native String lint(String source);
-    public static native void run(int budget, boolean single);
+    public static native void run(int budget, boolean single, boolean timeLimited);
+    public static void run(int budget, boolean single) {
+        run(budget, single, true);
+    }
     public static native void pause();
     public static native void breakpoints(int[] lines);
     public static native int state();

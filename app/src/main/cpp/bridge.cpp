@@ -27,9 +27,9 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_armstudio_Native_lint(JNIEnv *e, j
     Engine checker;
     return js(e, checker.assemble(str(e, s), false));
 }
-extern "C" JNIEXPORT void JNICALL Java_dev_armstudio_Native_run(JNIEnv *, jclass, jint n,
-                                                                jboolean single) {
-    engine().run(n, single);
+extern "C" JNIEXPORT void JNICALL
+Java_dev_armstudio_Native_run(JNIEnv *, jclass, jint n, jboolean single, jboolean timeLimited) {
+    engine().run(n, single, timeLimited);
 }
 extern "C" JNIEXPORT void JNICALL Java_dev_armstudio_Native_pause(JNIEnv *, jclass) {
     engine().stop();

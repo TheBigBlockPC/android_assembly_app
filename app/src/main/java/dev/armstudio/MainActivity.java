@@ -45,6 +45,8 @@ public class MainActivity extends Activity {
     Spinner manualTopics;
     int inspectorLine = 0;
     String instructionSignature = "";
+    boolean placeholderShown = false;
+    String consoleRaw = "";
     String project = "Hello world", source = "", lintError = "";
     boolean changing = false, dirty = true, running = false, destroyed = false;
     int generation = 0, memoryAddress = 0x10000;
@@ -61,10 +63,12 @@ public class MainActivity extends Activity {
             if (!running || destroyed)
                 return;
             long started = SystemClock.uptimeMillis();
+            // Fast mode runs untimed batches: a batch ends only on svc #3, a breakpoint,
+            // a fault, or the one-million-instruction safety pause.
             Native.run(executionMode == SLOW   ? 1
                        : executionMode == FAST ? Integer.MAX_VALUE
                                                : 12000,
-                       false);
+                       false, executionMode != FAST);
             if (Native.state() != 0)
                 running = false;
             // Fast mode spends its time executing, not rebuilding inspector rows each batch.
@@ -1209,14 +1213,41 @@ public class MainActivity extends Activity {
             frame.update();
             modeLabel.setText(new String[] {"TEXT  /  40 × 30 CELLS", "RGB565  /  320 × 240",
                                             "RGB888  /  320 × 240"}[Native.mode()]);
-            String out = Native.output().replaceAll("\u001B\\[[0-9;]*[A-Za-z]", "");
-            console.setText(out.isEmpty() ? "Output appears here." : out);
+            String out = Native.output();
+            if (!out.equals(consoleRaw)) {
+                consoleRaw = out;
+                console.setText(out.isEmpty() ? "Output appears here." :
+                                      out.replaceAll("\u001B\\[[0-9;]*[A-Za-z]", ""));
+            }
         }
         if (tab == 2 && memoryView != null) {
-            refreshInstructions();
-            memoryView.setText(Native.memory(memoryAddress));
-            registerView.setText(Native.registers());
+            if (running && executionMode == FAST)
+                inspectPlaceholder();
+            else {
+                placeholderShown = false;
+                refreshInstructions();
+                memoryView.setText(Native.memory(memoryAddress));
+                registerView.setText(Native.registers());
+            }
         }
+    }
+    // Fast runs change registers thousands of times per second, so their values only make
+    // sense when the program stops. Withhold the JNI work and view rebuilds until then.
+    void inspectPlaceholder() {
+        if (placeholderShown)
+            return;
+        placeholderShown = true;
+        instructionSignature = "";
+        inspectorLine = 0;
+        instructionHeading.setText("Running · pause to inspect");
+        instructionRows.removeAllViews();
+        TextView note =
+            text("Registers, memory and instructions appear here when the program pauses", 12,
+                 muted);
+        note.setPadding(dp(14), dp(8), 0, dp(8));
+        instructionRows.addView(note);
+        memoryView.setText("Hidden while running in fast mode");
+        registerView.setText("Hidden while running in fast mode");
     }
     void menu(View anchor) {
         PopupMenu p = new PopupMenu(this, anchor);

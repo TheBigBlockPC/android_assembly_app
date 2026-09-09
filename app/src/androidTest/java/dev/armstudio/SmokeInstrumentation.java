@@ -288,6 +288,32 @@ public class SmokeInstrumentation extends Instrumentation {
             Thread.sleep(100);
             main(() -> {
                 check(Native.count() == count[0], "No queued execution continues after Pause");
+            });
+            // Fast mode withholds live inspector data while the VM is in flight.
+            source("loop:\nsvc #3\nb loop\n");
+            main(() -> {
+                activity.modeButtons.get(MainActivity.FAST).performClick();
+                activity.runButton.performClick();
+                activity.showTab(2);
+            });
+            Thread.sleep(120);
+            main(() -> {
+                check(activity.running && Native.state() == 0,
+                      "Yielding fast program keeps running between batches");
+                check(activity.registerView.getText().toString().contains("Hidden"),
+                      "Fast run hides live registers");
+                check(activity.memoryView.getText().toString().contains("Hidden"),
+                      "Fast run hides live memory");
+                check(activity.instructionHeading.getText().toString().startsWith("Running"),
+                      "Fast run hides live instruction context");
+                activity.pauseAndInspect();
+                check(!activity.running &&
+                          activity.registerView.getText().toString().contains("NZCV"),
+                      "Pausing a fast run reveals registers");
+                check(activity.inspectorLine > 0,
+                      "Pausing a fast run reveals the current instruction");
+            });
+            main(() -> {
                 activity.showTab(3);
                 findButton(activity.guidePage, "VM manual").performClick();
                 check(activity.manualTopics.getCount() == 12,
