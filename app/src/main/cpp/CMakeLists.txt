@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(armstudio LANGUAGES CXX ASM)
+add_library(armstudio SHARED engine.cpp content.cpp bridge.cpp trampoline.S)
+target_link_libraries(armstudio android log)
+target_link_options(armstudio PRIVATE "-Wl,-z,max-page-size=16384")
