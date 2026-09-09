@@ -105,7 +105,7 @@ Default: the original execution behavior, up to 12000 instructions per batch fol
 
 Fast: execute continuous batches at the maximum available VM throughput, with no deliberate delay between ordinary batches. The UI is sampled about 30 times per second. Each batch retains the 8 ms time budget so input and Pause remain responsive. An explicit svc #3 still presents and waits for the next frame.
 
-All modes preserve breakpoints, checked memory, and the one-million-instruction safety pause. Switching modes or adjusting the slider preserves registers, memory, and instruction count. Step always executes exactly one instruction. Mode and slow-speed preferences are saved on this device.
+All modes preserve breakpoints and checked memory. The machine runs indefinitely until you pause it, the program exits with a syscall, or a fault occurs. Switching modes or adjusting the slider preserves registers, memory, and instruction count. Step always executes exactly one instruction. Mode and slow-speed preferences are saved on this device.
 
 EXECUTION MODEL
 
@@ -113,7 +113,7 @@ This is a documented ARM64 subset, not a Linux environment or a general-purpose 
 
 Arithmetic, bit operations, comparisons, and scalar floating-point instructions execute as real ARM64 instructions on your phone. The C++ dispatcher checks and handles guest memory, branches, large immediate/address pseudo-instructions, SP arithmetic, and VM calls. Native snippets are generated from an allowlist of encodings, with host state preserved; guest addresses never become host pointers. Generated code changes from writable to read/execute before use. Guest code cannot modify it.
 
-Execution yields to Android between bounded batches in every speed mode. After 1,000,000 instructions the VM pauses, including loops that present frames; tap Run to continue. Pause is always available. Out-of-bounds reads/writes, bad branch addresses, invalid calls, and assembly errors become visible diagnostics. This is an in-process educational sandbox, not a security boundary for adversarial binaries.
+Execution yields to Android between bounded batches in every speed mode. The machine runs indefinitely until you pause it, the program exits with a syscall, or a fault occurs. Out-of-bounds reads/writes, bad branch addresses, invalid calls, and assembly errors become visible diagnostics. This is an in-process educational sandbox, not a security boundary for adversarial binaries.
 
 REGISTERS & STARTUP
 
@@ -185,6 +185,7 @@ Color field: native integer math writes all 76800 RGB pixels.
 Touch canvas: poll single-pointer input and paint while touching.
 Keyboard echo: poll the on-screen keys and print ASCII.
 Float & stack: native float math, conversions, a function call, and stack pairs.
+Animation: a bouncing square — each frame erases the old square and draws the new one.
 
 DEBUGGING
 
@@ -329,6 +330,90 @@ double_it:
     add x2, x1, x1
     ldp x29, x30, [sp], #16
     ret
+)ASM";
+    case 5:
+        return R"ASM(// Bouncing square · runs forever, Pause to stop
+// Fill the screen once, then each frame erase the old square and draw
+// the new one, so the ball is always on the display.
+.text
+_start:
+    mov x0, #2
+    svc #1
+    mov x10, #FRAMEBUFFER
+    mov w2, #50
+    mov w3, #60
+    mov w4, #3
+    mov w5, #2
+    mov w6, #28
+    mov w7, #320
+    mov w8, #292
+    mov w9, #0x00ff6688
+    mov w13, #0x00203040
+    mov x11, x10
+    mov w12, #76800
+fill:
+    str w13, [x11], #4
+    subs w12, w12, #1
+    b.ne fill
+frame:
+    mov w12, #0
+erow:
+    mov w14, #0
+ecol:
+    add w16, w3, w12
+    madd w17, w16, w7, w2
+    add w17, w17, w14
+    lsl x17, x17, #2
+    add x17, x17, x10
+    str w13, [x17]
+    add w14, w14, #1
+    cmp w14, w6
+    b.lt ecol
+    add w12, w12, #1
+    cmp w12, w6
+    b.lt erow
+    add w2, w2, w4
+    cmp w2, #0
+    b.gt ok_xl
+    mov w2, #0
+    neg w4, w4
+ok_xl:
+    add w14, w2, w6
+    cmp w14, w7
+    b.ls ok_xr
+    mov w2, w8
+    neg w4, w4
+ok_xr:
+    add w3, w3, w5
+    cmp w3, #0
+    b.gt ok_yl
+    mov w3, #0
+    neg w5, w5
+ok_yl:
+    add w14, w3, w6
+    cmp w14, #240
+    b.ls ok_yr
+    mov w3, #212
+    neg w5, w5
+ok_yr:
+    mov w12, #0
+row:
+    mov w14, #0
+col:
+    add w16, w3, w12
+    madd w17, w16, w7, w2
+    add w17, w17, w14
+    lsl x17, x17, #2
+    add x17, x17, x10
+    str w9, [x17]
+    add w14, w14, #1
+    cmp w14, w6
+    b.lt col
+    add w12, w12, #1
+    cmp w12, w6
+    b.lt row
+    svc #3
+    b frame
 )ASM";
     default:
         return R"ASM(// Hello, ARM64.

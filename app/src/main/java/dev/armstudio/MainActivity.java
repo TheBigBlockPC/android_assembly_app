@@ -57,18 +57,17 @@ public class MainActivity extends Activity {
     String completion = "";
     int prefixStart = 0, prefixEnd = 0;
     final String[] examples = {"Hello world", "Color field", "Touch canvas", "Keyboard echo",
-                               "Float & stack"};
+                               "Float & stack", "Animation"};
     final Runnable tick = new Runnable() {
         public void run() {
             if (!running || destroyed)
                 return;
             long started = SystemClock.uptimeMillis();
-            // Fast mode runs untimed batches: a batch ends only on svc #3, a breakpoint,
-            // a fault, or the one-million-instruction safety pause.
-            Native.run(executionMode == SLOW   ? 1
-                       : executionMode == FAST ? Integer.MAX_VALUE
-                                               : 12000,
-                       false, executionMode != FAST);
+            // Fast mode has no instruction cap and no inter-batch delay; every mode keeps
+            // the short time budget so Pause and input stay responsive on long loops.
+            Native.run(executionMode == SLOW ? 1 : executionMode == FAST ? Integer.MAX_VALUE
+                                                                           : 12000,
+                       false);
             if (Native.state() != 0)
                 running = false;
             // Fast mode spends its time executing, not rebuilding inspector rows each batch.
@@ -994,7 +993,7 @@ public class MainActivity extends Activity {
                     // entries.
                     for (String entry :
                          paragraph.split("\\n(?=0x|#[0-5]  |Hello world:|Color field:|Touch " +
-                                         "canvas:|Keyboard echo:|Float & stack:)")) {
+                                         "canvas:|Keyboard echo:|Float & stack:|Animation:)")) {
                         LinearLayout card = col();
                         card.setPadding(dp(14), dp(12), dp(14), dp(12));
                         card.setBackground(shape(surface, border, 12));

@@ -882,14 +882,12 @@ void Engine::run(int budget, bool single, bool timeLimited) {
                 status = "Stepped · line " + std::to_string(currentLine());
                 break;
             }
-            if (count % 1000000 == 0) {
-                paused = true;
-                status = "Paused · 1M instruction safety limit; Run to continue";
-                break;
-            }
             if (yielded)
                 break;
-            if (timeLimited && (j & 31) == 31 && std::chrono::steady_clock::now() >= deadline)
+            // The machine runs until the user stops it or a syscall ends it; the deadline
+            // only bounds how long a batch keeps the UI thread, so 1024 steps between
+            // clock reads costs nothing (worst case ~60 us past the budget).
+            if (timeLimited && (j & 1023) == 1023 && std::chrono::steady_clock::now() >= deadline)
                 break;
         }
         if (!halted && !paused)

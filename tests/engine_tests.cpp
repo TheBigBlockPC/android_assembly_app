@@ -102,9 +102,24 @@ int main() {
                   d[8] == 3 && d[9] == 3 && d[12] == 12 && e.ctx.x[0] == 1 && e.ctx.x[1] == 12 &&
                   e.ctx.x[3] == 4,
               "Native scalar floating point");
-        for (int n = 0; n < 5; n++) {
+        for (int n = 0; n < 6; n++) {
             compile(e, example(n));
-            if (n == 2) {
+            if (n == 5) {
+                e.run(250000, false, false);
+                bool ball = false, backdrop = false;
+                for (int32_t p : e.pixels()) {
+                    if (uint32_t(p) == 0xffff6688)
+                        ball = true;
+                    if (uint32_t(p) == 0xff203040)
+                        backdrop = true;
+                }
+                check(ball && backdrop && !e.paused && !e.halted,
+                      "Animation draws its square and keeps running");
+                while (!e.halted && !e.paused && e.count < 50000000)
+                    e.run(2147483647, false, true);
+                check(!e.halted && !e.paused && e.ctx.x[2] <= 292 && e.ctx.x[3] <= 212,
+                      "Animation bounces off every wall past 50M instructions");
+            } else if (n == 2) {
                 e.input(0, false, 101, 80, true);
                 e.run(100);
                 uint32_t pixel = 0;
@@ -139,12 +154,6 @@ int main() {
         e.run(100);
         check(e.halted && e.ctx.x[0] == 3, "Resume after step");
         e.breaks.clear();
-        compile(e, "loop: b loop");
-        while (!e.paused)
-            e.run(12000);
-        check(e.paused && e.count == 1000000, "Infinite loop safety limit");
-        e.run(1, true);
-        check(e.count == 1000001, "Resume safety pause");
         expectFault("mov x0, #0xffffffffffffffff\nldr x1, [x0]");
         expectFault("mov x0, #0\nstr x1, [x0]");
         expectFault("mov x0, #0x150000\nstr w1, [x0]");
@@ -228,16 +237,16 @@ int main() {
                 e.run(budget);
             check(e.ctx.x[0] == 1500 && e.count == 4503,
                   "Slow/default/fast batches preserve identical results and ticks");
-            compile(e, "loop: b loop");
-            while (!e.paused)
-                e.run(budget);
-            check(e.count == 1000000, "Safety limit remains exact at every execution speed");
         }
         compile(e, paced);
         while (!e.halted)
             e.run(2147483647, false, false);
         check(e.ctx.x[0] == 1500 && e.count == 4503,
               "Untimed batches preserve identical results and ticks");
+        compile(e, "loop: b loop");
+        e.run(1000001, false, false);
+        check(e.count == 1000001 && !e.paused && !e.halted,
+              "Loops run past one million instructions until explicitly stopped");
         compile(e, "svc #3\nmov x0, #42\nhlt #0");
         e.run(2147483647);
         check(e.yielded && e.count == 1 && e.ctx.x[0] == 0, "Fast batches honor explicit present");

@@ -9,3 +9,7 @@ inspector improvements:
 
 guide improvements:
 *   organize the VM manual in a more readable way than just one massive text block
+
+runtime and examples:
+*   an animation example
+*   the machine runs indefinitely until stopped by the user or a syscall
