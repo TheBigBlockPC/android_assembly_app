@@ -92,18 +92,18 @@ brk|System|control|brk #0|Stop the program safely.
 nop|System|control|nop|No operation.)DOC";
 }
 std::string documentation() {
-    return R"DOC(ARM STUDIO / FIELD GUIDE
+    return std::string(R"DOC(ARM STUDIO / FIELD GUIDE
 
 A small, native ARM64 workbench.
-Write a program, tap Assemble, then Run. Tap the editor's line-number gutter to toggle a breakpoint. Step executes one instruction. Run resumes a paused program; Reset assembles a fresh state. Your current draft is saved automatically, and Projects stores named programs. Export writes a .s file using Android's file picker.
+Write a program, expand Run controls to Assemble or Step, then tap Run. Tap the editor's line-number gutter to toggle a breakpoint. Step executes one instruction. Run resumes a paused program; Reset assembles a fresh state. Your current draft is saved automatically, and Projects stores named programs. Export writes source, machine configuration or a bundled project using Android's file picker. Machine builder selects environments and virtual components.
 
 EXECUTION MODES
 
-Slow: execute one instruction at a time at 1–30 instructions per second. Select Slow above the workspace and drag the speed slider. Run opens Inspect, where the highlighted row shows the last executed instruction while running. Pausing highlights the next instruction instead. Speed changes take effect while running; Android scheduling can make the actual rate slightly lower.
+Slow: execute one instruction at a time at 1–30 instructions per second. Expand Run controls and select Slow and drag the speed slider. Run opens Inspect, where the highlighted row shows the last executed instruction while running. Pausing highlights the next instruction instead. Speed changes take effect while running; Android scheduling can make the actual rate slightly lower.
 
 Default: the original execution behavior, up to 12000 instructions per batch followed by a 16 ms delay. Each batch also has an approximately 8 ms time budget. Use this for interactive framebuffer programs.
 
-Fast: execute continuous batches at the maximum available VM throughput, with no deliberate delay between ordinary batches. The UI is sampled about 30 times per second. Each batch retains the 8 ms time budget so input and Pause remain responsive. An explicit svc #3 still presents and waits for the next frame.
+Fast: compile register arithmetic, large constants and direct branches into native ARM64 blocks. A CPU context is loaded once for up to 1024 guest instructions, instead of once per arithmetic instruction. Memory, indirect branches and VM calls retain checked C++ dispatch. Active breakpoints use precise instruction dispatch. There is no deliberate delay between ordinary batches. The UI is sampled about 30 times per second. Each batch retains the 8 ms time budget so input and Pause remain responsive. An explicit svc #3 still presents and waits for the next frame.
 
 All modes preserve breakpoints and checked memory. The machine runs indefinitely until you pause it, the program exits with a syscall, or a fault occurs. Switching modes or adjusting the slider preserves registers, memory, and instruction count. Step always executes exactly one instruction. Mode and slow-speed preferences are saved on this device.
 
@@ -117,7 +117,7 @@ Execution yields to Android between bounded batches in every speed mode. The mac
 
 REGISTERS & STARTUP
 
-x0–x30: 64-bit integers; w0–w30 alias their low 32 bits. W writes clear the upper half. xzr/wzr always read zero and discard writes. lr aliases x30; fp aliases x29. SP is a separate virtual stack pointer initialized to 0x000F0000. It works in checked memory addressing and 64-bit add/sub immediate operations. Stack grows down into RAM. d0–d31 and s0–s31 provide scalar float64/float32. NZCV starts at zero. FP uses round-to-nearest with traps disabled and restores the host FP environment after each instruction.
+x0–x30: 64-bit integers; w0–w30 alias their low 32 bits. W writes clear the upper half. xzr/wzr always read zero and discard writes. lr aliases x30; fp aliases x29. SP is a separate virtual stack pointer initialized to 0x000F0000. It works in checked memory addressing and 64-bit add/sub immediate operations. Stack grows down into RAM. d0–d31 and s0–s31 provide scalar float64/float32. NZCV starts at zero. FP uses round-to-nearest with traps disabled and restores the host FP environment when each native block or single-step returns.
 
 Registers and memory start at zero except SP and x30. x30 initially points just past the code, allowing top-level ret to finish. Entry is _start when defined, otherwise the first instruction. PC is a virtual byte address; each parsed instruction occupies four bytes, including pseudo-instructions.
 
@@ -130,7 +130,11 @@ COMPLETE MEMORY MAP · LITTLE ENDIAN
 0x00100000–0x0014AFFF  Framebuffer, 307200 bytes. Read/write. All modes use the same base.
 0x0014B000–0x0014FFFF  Unmapped.
 0x00150000–0x0015001F  Read-only input/tick registers, detailed below.
-0x00150020 onward      Unmapped.
+0x00150020–0x0015FFFF  Unmapped.
+0x00160000             Read-only device discovery table; header + 32-byte entries.
+0x00200000 onward      Configured component register pages; discover bases from the table.
+0x00800000 onward      Additional GPU framebuffers; discover addresses through GPU registers.
+All other addresses   Unmapped. Each device register page is 4096 bytes, with 65536-byte spacing. Default-size first GPUs share the legacy framebuffer at 0x00100000.
 
 All accesses must fit wholly inside one mapped region. Unaligned transfers are supported. Memory panel shows -- for unmapped bytes. Initial RAM and unused framebuffer bytes are zero.
 
@@ -142,7 +146,7 @@ INPUT REGISTERS
 0x0015000C  TOUCH_Y      u32, 0–239.
 0x00150010  TOUCH_DOWN   u32, 1 while the primary pointer touches the framebuffer.
 0x00150014  Reserved     u32, always zero.
-0x00150018  TICKS        u64, completed instruction count, updated after each instruction.
+0x00150018  TICKS        u64, completed instruction count, synchronized before memory accesses and at native block boundaries.
 
 KEY, KEY_DOWN, TOUCH_X, TOUCH_Y, TOUCH_DOWN, TICKS, and FRAMEBUFFER are built-in address constants. Input is live and thus depends on your interaction; ticks are deterministic instruction counts, not wall-clock time. Extra touch pointers are ignored.
 
@@ -159,7 +163,7 @@ No real Linux svc is executed. Only #0–#5 are accepted. Host clock, files, soc
 
 FRAMEBUFFER FORMATS
 
-320 × 240 fixed pixels, scaled to fit the display with no filtering. Touch coordinates use these original pixels.
+Default: 320 × 240 pixels. Phone: 320 × 640. Custom sizes are configured in Machine builder. Pixels scale with no filtering, preserving the configured aspect ratio. Touch coordinates use configured display pixels.
 
 Text (mode 0): 40 columns × 30 rows, each cell 8 × 8 pixels. Four bytes per cell: ASCII character, foreground palette index, background palette index, reserved. Address = FRAMEBUFFER + (row × 40 + column) × 4. Bytes beyond 4800 are unused in this mode. Direct cell writes and svc #2 share this buffer. Newline, carriage return, tab, wrapping, and scrolling are supported.
 
@@ -186,6 +190,8 @@ Touch canvas: poll single-pointer input and paint while touching.
 Keyboard echo: poll the on-screen keys and print ASCII.
 Float & stack: native float math, conversions, a function call, and stack pairs.
 Animation: a bouncing square — each frame erases the old square and draws the new one.
+Spinning cube: six colored faces (twelve triangles), a rotating model matrix, perspective projection and depth testing. Runs until paused; selecting it attaches an Advanced GPU.
+Component demos: one discoverable-device example for each of the nine component types; choosing an example attaches the required component. Legacy graphics examples use the Default environment.
 
 DEBUGGING
 
@@ -194,7 +200,7 @@ Inspect shows up to seven assembled instructions around the highlighted row, wit
 Breakpoint dots bind to source line numbers; edits clear them to avoid stopping on a different statement. A breakpoint pauses before execution. Run skips the current breakpoint once, then observes subsequent visits. Step ignores breakpoints for one instruction. Registers and memory stay inspectable after faults. Editing stops the current program and marks it for reassembly. Build errors are shown below the editor and the relevant source line is underlined in red.
 
 Font sizes for editor and docs are independent under Settings. App colors follow Android's light/dark setting. No account or internet permission is needed.
-)DOC";
+)DOC") + "\n\nVIRTUAL COMPONENTS\n\n" + componentDocumentation();
 }
 std::vector<ManualSection> manualSections() {
     const std::vector<std::pair<std::string, std::string>> headings = {
@@ -217,16 +223,19 @@ std::vector<ManualSection> manualSections() {
             continue;
         const auto from = start + headings[n].first.size() + 2;
         const auto end =
-            n + 1 == headings.size() ? all.size() : all.find(headings[n + 1].first + "\n\n", from);
+            n + 1 == headings.size() ? all.find("VIRTUAL COMPONENTS\n\n", from) : all.find(headings[n + 1].first + "\n\n", from);
         auto body = all.substr(from, end == std::string::npos ? end : end - from);
         const auto last = body.find_last_not_of("\r\n ");
         if (last != std::string::npos)
             body.resize(last + 1);
         sections.push_back({headings[n].second, body});
     }
+    sections.push_back({"Virtual components", componentDocumentation()});
     return sections;
 }
 std::string example(int index) {
+    if (index == 15) return cubeExample();
+    if (index >= 6 && index <= 14) return deviceExample(index - 5);
     switch (index) {
     case 1:
         return R"ASM(// Color field · RGB888 in 32 bits

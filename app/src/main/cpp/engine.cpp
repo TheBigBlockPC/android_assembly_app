@@ -210,11 +210,19 @@ static std::string stringLiteral(std::string s) {
     }
     return out;
 }
-Engine::Engine() : mem(MEM_END, 0) {}
+Engine::Engine() : mem(MEM_END, 0) {
+    configure(320, 240, {1, 4, 5, 6, 7, 8, 9});
+}
 Engine::~Engine() {
     release();
 }
 void Engine::release() {
+    if (fastJit) {
+        munmap(fastJit, fastSize);
+        fastJit = nullptr;
+    }
+    fastSize = 0;
+    fastEntries.clear();
     if (jit) {
         munmap(jit, jitSize);
         jit = nullptr;
@@ -235,16 +243,23 @@ std::string Engine::assemble(const std::string &source, bool executable) {
     output.clear();
     code.clear();
     mem.assign(MEM_END, 0);
+    resetDevices();
     cursorX = cursorY = bg = 0;
     fg = 7;
     escape.clear();
     int line = 0;
     try {
         require(source.size() <= 256 * 1024, "Source exceeds 256 KiB");
-        std::map<std::string, uint64_t> labels = {
-            {"FRAMEBUFFER", FB},    {"KEY", INPUT},          {"KEY_DOWN", INPUT + 4},
-            {"TOUCH_X", INPUT + 8}, {"TOUCH_Y", INPUT + 12}, {"TOUCH_DOWN", INPUT + 16},
-            {"TICKS", INPUT + 24}};
+        std::map<std::string, uint64_t> labels = {{"DEVICE_TABLE", DEVICE_TABLE},
+                                                  {"SCREEN_WIDTH", uint64_t(screenWidth)},
+                                                  {"SCREEN_HEIGHT", uint64_t(screenHeight)},
+                                                  {"FRAMEBUFFER", displayBase},
+                                                  {"KEY", INPUT},
+                                                  {"KEY_DOWN", INPUT + 4},
+                                                  {"TOUCH_X", INPUT + 8},
+                                                  {"TOUCH_Y", INPUT + 12},
+                                                  {"TOUCH_DOWN", INPUT + 16},
+                                                  {"TICKS", INPUT + 24}};
         struct Pending {
             int line;
             std::string op, args;
@@ -717,6 +732,7 @@ std::string Engine::assemble(const std::string &source, bool executable) {
             __builtin___clear_cache((char *)jit, (char *)jit + jitSize);
             require(mprotect(jit, jitSize, PROT_READ | PROT_EXEC) == 0,
                     "Cannot protect native code");
+            compileFast();
         }
         halted = false;
         status = "Assembled · " + std::to_string(code.size()) + " instructions";
@@ -742,13 +758,34 @@ void Engine::writeReg(int r, uint64_t v, int width) {
 }
 void Engine::check(uint64_t a, int n, bool wr) const {
     require(n > 0 && a <= MEM_END && uint64_t(n) <= MEM_END - a, "Memory access out of bounds");
+    bool peripheral = false;
+    for (const auto &d : devices) {
+        if (a >= d.base && a + n <= d.base + d.size && n <= 8) {
+            if (wr) {
+                uint32_t off = a - d.base;
+                bool buffer = d.type == 9 && off >= 64 && off + n <= 128;
+                bool reg = n == 4 && off % 4 == 0 &&
+                           ((d.type <= 3 &&
+                             (off == 4 || off == 20 || off == 24 ||
+                              (d.type >= 2 && off >= 32 && off <= (d.type == 2 ? 60U : 36U)))) ||
+                            (d.type == 7 && off <= 12) || (d.type == 9 && off <= 4));
+                require(buffer || reg, "Write to read-only or misaligned device register");
+            }
+            peripheral = true;
+        }
+        if (d.vram && a >= d.vram && a + n <= d.vram + uint64_t(screenWidth * screenHeight * 4))
+            peripheral = true;
+    }
+    bool table = !wr && a >= DEVICE_TABLE && a + n <= DEVICE_TABLE + 16 + devices.size() * 32;
     bool ram = a >= RAM && a + n <= RAM_END, fb = a >= FB && a + n <= FB_END,
          inp = a >= INPUT && a + n <= INPUT + 32, codeRead = a + n <= code.size() * 4;
-    require(ram || fb || (!wr && (inp || codeRead)),
+    require(ram || fb || peripheral || table || (!wr && (inp || codeRead)),
             wr ? "Write to unmapped or read-only memory" : "Read from unmapped memory");
 }
 uint64_t Engine::read(uint64_t a, int n) const {
     check(a, n, false);
+    if (auto *d = const_cast<Engine *>(this)->deviceAt(a))
+        return const_cast<Engine *>(this)->deviceRead(*d, a - d->base, n);
     uint64_t v = 0;
     std::memcpy(&v, mem.data() + a, n);
     return v;
@@ -756,6 +793,8 @@ uint64_t Engine::read(uint64_t a, int n) const {
 void Engine::write(uint64_t a, uint64_t v, int n) {
     check(a, n, true);
     std::memcpy(mem.data() + a, &v, n);
+    if (auto *d = deviceAt(a))
+        deviceWrite(*d, a - d->base);
 }
 void Engine::execute(const Instruction &i) {
     uint64_t next = pc + 4;
@@ -843,7 +882,7 @@ void Engine::execute(const Instruction &i) {
     }
     pc = next;
 }
-void Engine::run(int budget, bool single, bool timeLimited) {
+void Engine::run(int budget, bool single, bool timeLimited, bool fast) {
     if (halted)
         return;
     paused = false;
@@ -852,7 +891,15 @@ void Engine::run(int budget, bool single, bool timeLimited) {
     skipBreakpoint = false;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(8);
     try {
+        serviceDevices();
         for (int j = 0; j < budget; j++) {
+            if (fast && !single && breaks.empty() && runFast(std::min(1024, budget - j))) {
+                j += int(ctx.executed) - 1;
+                serviceDevices();
+                if (timeLimited && std::chrono::steady_clock::now() >= deadline)
+                    break;
+                continue;
+            }
             if (pc == code.size() * 4) {
                 halted = true;
                 status = "Finished";
@@ -887,8 +934,11 @@ void Engine::run(int budget, bool single, bool timeLimited) {
             // The machine runs until the user stops it or a syscall ends it; the deadline
             // only bounds how long a batch keeps the UI thread, so 1024 steps between
             // clock reads costs nothing (worst case ~60 us past the budget).
-            if (timeLimited && (j & 1023) == 1023 && std::chrono::steady_clock::now() >= deadline)
-                break;
+            if ((j & 1023) == 1023) {
+                serviceDevices();
+                if (timeLimited && std::chrono::steady_clock::now() >= deadline)
+                    break;
+            }
         }
         if (!halted && !paused)
             status = "Running · " + std::to_string(count) + " instructions";
@@ -928,15 +978,24 @@ std::vector<InstructionLocation> Engine::instructionWindow(bool lastExecuted) co
 void Engine::input(int key, bool down, int x, int y, bool touch) {
     uint32_t values[6] = {(uint32_t)key,
                           down ? 1U : 0U,
-                          (uint32_t)std::clamp(x, 0, 319),
-                          (uint32_t)std::clamp(y, 0, 239),
+                          (uint32_t)std::clamp(x, 0, screenWidth - 1),
+                          (uint32_t)std::clamp(y, 0, screenHeight - 1),
                           touch ? 1U : 0U,
                           0};
     std::memcpy(mem.data() + INPUT, values, sizeof(values));
+    for (auto &d : devices) {
+        if (d.type == 5) {
+            std::memcpy(mem.data() + d.base, values + 2, 12);
+            touches(touch ? std::vector<int>{0, x, y} : std::vector<int>{});
+        }
+        if (d.type == 6)
+            std::memcpy(mem.data() + d.base, values, 8);
+    }
 }
 void Engine::put(char c) {
     const auto clear = [&]() {
-        std::fill(mem.begin() + FB, mem.begin() + FB + 4800, 0);
+        std::fill(mem.begin() + displayBase,
+                  mem.begin() + displayBase + (screenWidth / 8 * (screenHeight / 8) * 4), 0);
         cursorX = cursorY = 0;
     };
     if (!escape.empty()) {
@@ -984,8 +1043,8 @@ void Engine::put(char c) {
             } else if (c == 'J' && nums[0] == 2)
                 clear();
             else if (c == 'H') {
-                cursorY = std::clamp(nums[0] - 1, 0, 29);
-                cursorX = nums.size() > 1 ? std::clamp(nums[1] - 1, 0, 39) : 0;
+                cursorY = std::clamp(nums[0] - 1, 0, screenHeight / 8 - 1);
+                cursorX = nums.size() > 1 ? std::clamp(nums[1] - 1, 0, screenWidth / 8 - 1) : 0;
             }
             escape.clear();
         }
@@ -1007,24 +1066,28 @@ void Engine::put(char c) {
             put(' ');
         return;
     } else if ((uint8_t)c >= 32) {
-        if (cursorY >= 30) {
-            std::memmove(mem.data() + FB, mem.data() + FB + 160, 4640);
-            std::fill(mem.begin() + FB + 4640, mem.begin() + FB + 4800, 0);
-            cursorY = 29;
+        if (cursorY >= screenHeight / 8) {
+            std::memmove(mem.data() + displayBase, mem.data() + displayBase + (screenWidth / 8 * 4),
+                         (screenWidth / 8 * (screenHeight / 8 - 1) * 4));
+            std::fill(mem.begin() + displayBase + (screenWidth / 8 * (screenHeight / 8 - 1) * 4),
+                      mem.begin() + displayBase + (screenWidth / 8 * (screenHeight / 8) * 4), 0);
+            cursorY = screenHeight / 8 - 1;
         }
-        auto a = FB + (cursorY * 40 + cursorX) * 4;
+        auto a = displayBase + (cursorY * (screenWidth / 8) + cursorX) * 4;
         mem[a] = (uint8_t)c;
         mem[a + 1] = fg;
         mem[a + 2] = bg;
-        if (++cursorX == 40) {
+        if (++cursorX == screenWidth / 8) {
             cursorX = 0;
             cursorY++;
         }
     }
-    if (cursorY >= 30) {
-        std::memmove(mem.data() + FB, mem.data() + FB + 160, 4640);
-        std::fill(mem.begin() + FB + 4640, mem.begin() + FB + 4800, 0);
-        cursorY = 29;
+    if (cursorY >= screenHeight / 8) {
+        std::memmove(mem.data() + displayBase, mem.data() + displayBase + (screenWidth / 8 * 4),
+                     (screenWidth / 8 * (screenHeight / 8 - 1) * 4));
+        std::fill(mem.begin() + displayBase + (screenWidth / 8 * (screenHeight / 8 - 1) * 4),
+                  mem.begin() + displayBase + (screenWidth / 8 * (screenHeight / 8) * 4), 0);
+        cursorY = screenHeight / 8 - 1;
     }
 }
 void Engine::syscall(int n) {
@@ -1036,7 +1099,8 @@ void Engine::syscall(int n) {
     case 1:
         require(ctx.x[0] <= 2, "Graphics mode must be 0, 1 or 2");
         mode = ctx.x[0];
-        std::fill(mem.begin() + FB, mem.begin() + FB_END, 0);
+        std::fill(mem.begin() + displayBase,
+                  mem.begin() + (displayBase + screenWidth * screenHeight * 4), 0);
         cursorX = cursorY = 0;
         fg = 7;
         bg = 0;
@@ -1071,12 +1135,13 @@ void Engine::syscall(int n) {
         break;
     case 4:
         if (mode == 0) {
-            std::fill(mem.begin() + FB, mem.begin() + FB + 4800, 0);
+            std::fill(mem.begin() + displayBase,
+                      mem.begin() + displayBase + (screenWidth / 8 * (screenHeight / 8) * 4), 0);
             cursorX = cursorY = 0;
         } else {
             int nbytes = mode == 1 ? 2 : 4;
-            for (int j = 0; j < 320 * 240; j++)
-                std::memcpy(mem.data() + FB + j * nbytes, &ctx.x[0], nbytes);
+            for (int j = 0; j < screenWidth * screenHeight; j++)
+                std::memcpy(mem.data() + displayBase + j * nbytes, &ctx.x[0], nbytes);
         }
         break;
     case 5:
@@ -1127,23 +1192,23 @@ std::string Engine::memory(uint32_t addr) const {
     return o.str();
 }
 std::vector<int32_t> Engine::pixels() const {
-    std::vector<int32_t> p(320 * 240);
-    for (int j = 0; j < 320 * 240; j++) {
+    std::vector<int32_t> p(screenWidth * screenHeight);
+    for (int j = 0; j < screenWidth * screenHeight; j++) {
         uint32_t c = 0;
         if (mode == 1) {
             uint16_t v;
-            std::memcpy(&v, mem.data() + FB + j * 2, 2);
+            std::memcpy(&v, mem.data() + displayBase + j * 2, 2);
             c = (((v >> 11) * 255 / 31) << 16) | ((((v >> 5) & 63) * 255 / 63) << 8) |
                 ((v & 31) * 255 / 31);
         } else
-            std::memcpy(&c, mem.data() + FB + j * 4, 4);
+            std::memcpy(&c, mem.data() + displayBase + j * 4, 4);
         p[j] = 0xff000000 | c;
     }
     return p;
 }
 std::vector<int32_t> Engine::cells() const {
-    std::vector<int32_t> p(1200);
-    std::memcpy(p.data(), mem.data() + FB, 4800);
+    std::vector<int32_t> p((screenWidth / 8 * (screenHeight / 8)));
+    std::memcpy(p.data(), mem.data() + displayBase, p.size() * 4);
     return p;
 }
 } // namespace armstudio

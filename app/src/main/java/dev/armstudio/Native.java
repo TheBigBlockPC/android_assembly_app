@@ -6,6 +6,9 @@ public final class Native {
     public static native String assemble(String source);
     public static native String lint(String source);
     public static native void run(int budget, boolean single);
+    public static native void runFast(int budget);
+    public static native String configure(int width, int height, int[] types, String nvPath);
+    public static native void touches(int[] points);
     public static native void pause();
     public static native void breakpoints(int[] lines);
     public static native int state();

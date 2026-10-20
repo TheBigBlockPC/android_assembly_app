@@ -251,8 +251,278 @@ int main() {
         e.run(2147483647);
         check(e.yielded && e.count == 1 && e.ctx.x[0] == 0, "Fast batches honor explicit present");
 
+        // Fast execution must match exact dispatch, including flags, every register and ticks.
+        const std::vector<std::string> fastPrograms = {
+            paced,
+            "mov x16, #0x123456789abcdef0\nmov x17, #-1\nmov x18, #444\nmov x29, #555\nmov x30, "
+            "#666\nmov x1, #10000\nloop: add x0, x0, #3\nsubs x1, x1, #1\nb.ne loop\ncset x2, "
+            "eq\nhlt #0",
+            "mov x0, #9\nscvtf d0, x0\nfsqrt d1, d0\nfcmp d1, d1\nb.ne fail\nfcvtzs x1, d1\ncbz "
+            "x1, fail\ntbnz x1, #0, ok\nfail: mov x2, #99\nok: tbz x1, #2, done\nmov x2, "
+            "#999\ndone: hlt #0",
+            "mov w0, #-1\ncbnz w0, one\nmov x1, #99\none: tbnz w0, #31, two\nmov x1, #88\ntwo: tbz "
+            "x0, #63, done\nmov x1, #77\ndone: hlt #0",
+            "mov x10, #0x10000\nmov x0, #100\nloop: str x0, [x10]\nsub x0, x0, #1\ncbnz x0, "
+            "loop\nldr x1, [x10]\nbl fn\nhlt #0\nfn: add x1, x1, #42\nret",
+            "mov x0, #7\nsvc #5\nmov x2, #4\nsvc #3\nadd x0, x0, x2\nret",
+            "mov x0, #42\nmov x1, #0\nstr x0, [x1]\nnop",
+            "loop: b loop"};
+        for (const auto &program : fastPrograms)
+            for (int budget : {1, 2, 3, 7, 64, 1024, 12000}) {
+                Engine slow, fast;
+                compile(slow, program);
+                compile(fast, program);
+                int total = program == fastPrograms.back() ? 3 : 100000;
+                for (int n = 0; n < total && !slow.halted; ++n) {
+                    slow.run(budget, false, false);
+                    fast.run(budget, false, false, true);
+                    check(slow.pc == fast.pc && slow.count == fast.count && slow.sp == fast.sp &&
+                              slow.ctx.flags == fast.ctx.flags &&
+                              std::memcmp(slow.ctx.x, fast.ctx.x, sizeof(slow.ctx.x)) == 0 &&
+                              std::memcmp(slow.ctx.d, fast.ctx.d, sizeof(slow.ctx.d)) == 0 &&
+                              slow.halted == fast.halted && slow.yielded == fast.yielded,
+                          "Compiled blocks preserve exact state at each budget boundary");
+                    if (slow.status.starts_with("Fault"))
+                        check(fast.status == slow.status, "Precise fast fault line");
+                    if (slow.yielded)
+                        break;
+                }
+                check(slow.mem == fast.mem, "Fast mode preserves memory and instruction ticks");
+            }
+        compile(e, "mov x0, #1\nloop: add x0, x0, #1\nb loop");
+        e.breaks = {2};
+        e.run(1024, false, false, true);
+        check(e.paused && e.count == 1 && e.ctx.x[0] == 1, "Fast breakpoints before execution");
+        e.run(1024, false, false, true);
+        check(e.paused && e.count == 3 && e.ctx.x[0] == 2, "Fast breakpoint skip exactly once");
+        e.breaks.clear();
+
+        for (int type = 1; type <= 9; ++type) {
+            e.configure(320, 240, type == 1 ? std::vector<int>{1} : std::vector<int>{1, type});
+            compile(e, deviceExample(type));
+            e.input('z', true, 80, 60, true);
+            for (int j = 0; j < 1000 && !e.halted; ++j) {
+                e.run(10000, false, true, true);
+                if (e.yielded && (type == 5 || type == 6))
+                    break;
+            }
+            check(!e.status.starts_with("Fault"),
+                  "Component demo " + std::to_string(type) + ": " + e.status);
+            if (type != 5 && type != 6)
+                check(e.halted, "Finite component demo completes");
+            if (type == 1)
+                check((e.cells()[0] & 255) == 'H' && (e.cells()[1] & 255) == 'i',
+                      "Minimal GPU text");
+            if (type == 2)
+                check(uint32_t(e.pixels()[0]) == 0xff60d0b0 &&
+                          uint32_t(e.pixels()[80 * 320 + 80]) == 0xffff6688,
+                      "Tile and sprite layers");
+            if (type == 3) {
+                auto pixels = e.pixels();
+                check(uint32_t(pixels[0]) == 0xff132030 &&
+                          uint32_t(pixels[120 * 320 + 160]) != 0xff132030,
+                      "3D triangles render");
+                check(std::isfinite(e.devices.back().depth[120 * 320 + 160]),
+                      "3D depth buffer populated");
+            }
+            if (type == 4)
+                check(e.ctx.x[10] > 0, "Timer returns milliseconds");
+            if (type == 5)
+                check(e.ctx.x[10] == 80 && e.ctx.x[11] == 60 && e.ctx.x[12] == 1,
+                      "Discoverable touch input");
+            if (type == 6)
+                check(e.output == "z", "Discoverable keyboard input");
+            if (type == 7)
+                check(e.output == "DMA copied!\n", "Asynchronous DMA copied source");
+            if (type == 8)
+                check(e.ctx.x[10] != e.ctx.x[11], "RNG produces changing values");
+            if (type == 9) {
+                auto before = e.ctx.x[10];
+                compile(e, deviceExample(9));
+                finish(e);
+                check(e.ctx.x[10] == ((before + 1) & 255) && e.ctx.x[11] == 2,
+                      "NVM survives assembly reset");
+            }
+        }
+        e.configure(320, 640, {1, 4, 5});
+        compile(e, "mov x0, #0\nsvc #1\nadr x0, msg\nmov x1, #0\nsvc #2\nhlt #0\n.data\nmsg: "
+                   ".asciz \"Phone\"");
+        finish(e);
+        check(e.cells().size() == 3200 && (e.cells()[0] & 255) == 'P', "Tall phone text display");
+        e.input(0, false, 319, 639, true);
+        e.touches({3, 10, 600, 7, 319, 639});
+        uint32_t touchBase = e.devices.back().base, contacts;
+        std::memcpy(&contacts, e.mem.data() + touchBase + 12, 4);
+        check(contacts == 2 && e.mem[touchBase + 16] == 3 && e.mem[touchBase + 32] == 7,
+              "Multitouch IDs and records");
+        e.configure(640, 960, {3});
+        compile(e, deviceExample(3));
+        finish(e);
+        check(e.pixels().size() == 640 * 960, "Maximum custom display renders");
+        bool invalid = false;
+        try {
+            e.configure(319, 240, {1});
+        } catch (...) {
+            invalid = true;
+        }
+        check(invalid, "Reject invalid display dimensions");
+        invalid = false;
+        try {
+            e.configure(320, 240, {1, 1});
+        } catch (...) {
+            invalid = true;
+        }
+        check(invalid, "Reject duplicate components");
+        e.configure(320, 240, {4});
+        uint32_t timerBase = e.devices[0].base;
+        e.configure(320, 240, {1, 4});
+        check(e.devices[1].base != timerBase, "Bases move when machine components change");
+        compile(e, "mov x0, #DEVICE_TABLE\nstr w1, [x0]");
+        e.run(100, false, false, true);
+        check(e.status.starts_with("Fault"), "Descriptor table is read-only");
+        compile(e, "mov x0, #" + std::to_string(e.devices[1].base) + "\nstr w1, [x0]");
+        e.run(100);
+        check(e.status.starts_with("Fault"), "Input/timer registers are read-only");
+        e.configure(320, 240, {1, 7});
+        compile(e, "mov x20, #" + std::to_string(e.devices[1].base) +
+                       "\nmov w0, #0\nstr w0, [x20]\nstr w0, [x20,#4]\nmov w0, #64\nstr w0, "
+                       "[x20,#8]\nmov w0,#1\nstr w0,[x20,#12]\nldr w10,[x20,#16]\nhlt #0");
+        finish(e);
+        check(e.ctx.x[10] == 3, "DMA rejects unmapped buffers without copying");
+        e.configure(320, 240, {1, 9});
+        compile(e, "mov x20, #" + std::to_string(e.devices[1].base) +
+                       "\nmov w0,#65535\nstr w0,[x20]\nmov w0,#1\nstr w0,[x20,#4]\nldr "
+                       "w10,[x20,#8]\nhlt #0");
+        finish(e);
+        check(e.ctx.x[10] == 3, "NVM rejects invalid block address");
+
+        e.configure(320, 240, {3});
+        compile(e, deviceExample(3));
+        finish(e);
+        std::set<uint32_t> textureColors;
+        for (uint32_t color : e.pixels())
+            if (color == 0xffffee88 || color == 0xff4488ff || color == 0xffff4488 ||
+                color == 0xff55ddaa)
+                textureColors.insert(color);
+        check(textureColors.size() >= 3,
+              "Textured triangles sample multiple nearest texture texels");
+        std::string depthProgram = "mov x20,#" + std::to_string(e.devices[0].base) + R"(
+adr x0, commands
+str w0,[x20,#32]
+mov w0,#96
+str w0,[x20,#36]
+mov w0,#3
+str w0,[x20,#4]
+hlt #0
+.data
+commands:
+.word 1,0,0,0,0,0,0,0
+.word 4,near_triangle,0,0,0,0,0,0
+.word 4,far_triangle,0,0,0,0,0,0
+near_triangle:
+.float -1,-1,-0.5,0,0
+.word 0xff0000
+.float 1,-1,-0.5,0,0
+.word 0xff0000
+.float 0,1,-0.5,0,0
+.word 0xff0000
+far_triangle:
+.float -1,-1,0.5,0,0
+.word 0x0000ff
+.float 1,-1,0.5,0,0
+.word 0x0000ff
+.float 0,1,0.5,0,0
+.word 0x0000ff
+)";
+        compile(e, depthProgram);
+        finish(e);
+        check(uint32_t(e.pixels()[120 * 320 + 160]) == 0xffff0000 &&
+                  e.devices[0].depth[120 * 320 + 160] == -0.5f,
+              "Depth buffer rejects later polygons behind visible geometry");
+        const std::string nvFile = "/data/local/tmp/armstudio-v3-nvm-regression.bin";
+        std::remove(nvFile.c_str());
+        {
+            Engine writer;
+            writer.configure(320, 240, {1, 9});
+            writer.storage(nvFile);
+            compile(writer, deviceExample(9));
+            finish(writer);
+            check(writer.ctx.x[10] == 1 && writer.ctx.x[11] == 2, "NVM commits a block to disk");
+        }
+        {
+            Engine reader;
+            reader.configure(320, 240, {1, 9});
+            reader.storage(nvFile);
+            compile(reader, deviceExample(9));
+            finish(reader);
+            check(reader.ctx.x[10] == 2 && reader.ctx.x[11] == 2,
+                  "NVM reloads committed state in a new engine");
+        }
+        std::remove(nvFile.c_str());
+        // Max-size programs and long direct branches remain legal in Fast mode.
+        std::string large = "mov x0,#1\nb.al last\nfirst: nop\n";
+        for (int j = 0; j < 8187; ++j)
+            large += "b.ne first\n";
+        large += "last: mov x1,#42\nhlt #0\n";
+        compile(e, large);
+        e.run(100, false, false, true);
+        check(e.halted && e.ctx.x[1] == 42 && e.count == 4,
+              "Long native branch spans and b.al preserve results");
+
+        // The cube stays animated and visible through a full Y rotation, without matrix drift.
+        e.configure(320, 240, {3});
+        compile(e, example(15));
+        std::vector<int32_t> firstCubeFrame;
+        for (int frame = 0; frame < 260; ++frame) {
+            e.run(12000, false, false, true);
+            check(!e.halted && e.yielded && !e.status.starts_with("Fault"),
+                  "Spinning cube renders and yields every frame");
+            auto pixels = e.pixels();
+            size_t colored = 0;
+            for (uint32_t pixel : pixels)
+                if (pixel != 0xff111c27)
+                    ++colored;
+            check(colored > 1000 && colored < 320 * 240 / 2,
+                  "Rotating cube remains visible and fits the display");
+            if (frame == 0)
+                firstCubeFrame = pixels;
+            if (frame == 60)
+                check(pixels != firstCubeFrame, "Cube rotation visibly changes the frame");
+        }
+        const auto modelValue = [&](int index) {
+            float value;
+            std::memcpy(&value, e.mem.data() + e.ctx.x[23] + index * 4, 4);
+            return double(value);
+        };
+        for (int col = 0; col < 3; ++col) {
+            double length = 0;
+            for (int row = 0; row < 3; ++row)
+                length += std::pow(modelValue(col * 4 + row), 2);
+            check(std::abs(length - 1) < 1e-5, "Cube rotation preserves unit scale over long runs");
+        }
+        check(modelValue(14) == -4.5 && std::isfinite(e.devices[0].depth[120 * 320 + 160]),
+              "Cube keeps its camera distance and writes visible depth");
+        auto pausedCount = e.count;
+        e.stop();
+        check(e.paused && e.count == pausedCount, "Cube can be paused between frames");
+        e.configure(320, 640, {3});
+        compile(e, example(15));
+        e.run(12000, false, false, true);
+        check(e.yielded && !e.halted && e.pixels().size() == 320 * 640,
+              "Cube also renders on the tall Phone display");
+        float projectionX, projectionY;
+        std::memcpy(&projectionX, e.mem.data() + e.ctx.x[26], 4);
+        std::memcpy(&projectionY, e.mem.data() + e.ctx.x[26] + 20, 4);
+        check(std::abs(projectionX * 320 - projectionY * 640) < 1e-3,
+              "Cube projection preserves square pixels on tall displays");
+        e.configure(320, 240, {1});
+        compile(e, example(15));
+        finish(e);
+        check(e.output.find("Attach an Advanced GPU") != std::string::npos,
+              "Cube gives an actionable message when its GPU is absent");
+
         auto sections = manualSections();
-        check(sections.size() == 11, "Manual exposes all eleven topics");
+        check(sections.size() == 12, "Manual exposes all twelve topics");
         std::set<std::string> titles;
         for (const auto &section : sections) {
             check(titles.insert(section.title).second && !section.body.empty(),

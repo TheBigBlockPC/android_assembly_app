@@ -118,3 +118,26 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_dev_armstudio_Native_manual(JNIEn
 extern "C" JNIEXPORT jstring JNICALL Java_dev_armstudio_Native_example(JNIEnv *e, jclass, jint n) {
     return js(e, example(n));
 }
+extern "C" JNIEXPORT void JNICALL Java_dev_armstudio_Native_runFast(JNIEnv *, jclass, jint n) {
+    engine().run(n, false, true, true);
+}
+extern "C" JNIEXPORT jstring JNICALL Java_dev_armstudio_Native_configure(JNIEnv *e, jclass,
+                                                                         jint width, jint height,
+                                                                         jintArray types,
+                                                                         jstring path) {
+    try {
+        std::vector<jint> values(e->GetArrayLength(types));
+        e->GetIntArrayRegion(types, 0, values.size(), values.data());
+        engine().configure(width, height, std::vector<int>(values.begin(), values.end()));
+        engine().storage(str(e, path));
+        return js(e, "");
+    } catch (const std::exception &ex) {
+        return js(e, ex.what());
+    }
+}
+extern "C" JNIEXPORT void JNICALL Java_dev_armstudio_Native_touches(JNIEnv *e, jclass,
+                                                                    jintArray points) {
+    std::vector<jint> values(e->GetArrayLength(points));
+    e->GetIntArrayRegion(points, 0, values.size(), values.data());
+    engine().touches(std::vector<int>(values.begin(), values.end()));
+}

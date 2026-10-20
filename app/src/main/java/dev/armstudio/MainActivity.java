@@ -16,11 +16,20 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.*;
+import org.json.*;
 
 public class MainActivity extends Activity {
     final Handler handler = new Handler(Looper.getMainLooper());
     final ExecutorService lintWorker = Executors.newSingleThreadExecutor();
     SharedPreferences prefs;
+    MachineConfig machine;
+    AlertDialog machineDialog;
+    Toast currentToast;
+    LinearLayout executionPanel, editorTools, keyboardPanel;
+    Button controlsToggle;
+    boolean controlsExpanded = false;
+    String pendingExport = "";
+    String pendingExportMessage = "";
     int bg, surface, raised, ink, muted, accent, border, error, tab = 0, editorSize = 14,
                                                                 docsSize = 15;
     LinearLayout root, body, nav, editorPage, runPage, inspectPage, guidePage;
@@ -51,23 +60,37 @@ public class MainActivity extends Activity {
     boolean changing = false, dirty = true, running = false, destroyed = false;
     int generation = 0, memoryAddress = 0x10000;
     int key = 0, touchX = 0, touchY = 0;
+    int[] touchContacts = new int[0];
     boolean keyDown = false, touchDown = false;
     TreeSet<Integer> breakpoints = new TreeSet<>();
     ArrayList<String[]> catalog = new ArrayList<>();
     String completion = "";
     int prefixStart = 0, prefixEnd = 0;
-    final String[] examples = {"Hello world", "Color field", "Touch canvas", "Keyboard echo",
-                               "Float & stack", "Animation"};
+    final String[] examples = {"Hello world",
+                               "Color field",
+                               "Touch canvas",
+                               "Keyboard echo",
+                               "Float & stack",
+                               "Animation",
+                               "Minimal GPU",
+                               "Basic GPU · tiles & sprites",
+                               "Advanced GPU · colored & textured 3D",
+                               "Timer",
+                               "Touch controller",
+                               "Keyboard controller",
+                               "DMA copy",
+                               "Random colors",
+                               "Persistent counter",
+                               "Spinning cube · Advanced GPU"};
     final Runnable tick = new Runnable() {
         public void run() {
             if (!running || destroyed)
                 return;
             long started = SystemClock.uptimeMillis();
-            // Fast mode has no instruction cap and no inter-batch delay; every mode keeps
-            // the short time budget so Pause and input stay responsive on long loops.
-            Native.run(executionMode == SLOW ? 1 : executionMode == FAST ? Integer.MAX_VALUE
-                                                                           : 12000,
-                       false);
+            if (executionMode == FAST)
+                Native.runFast(Integer.MAX_VALUE);
+            else
+                Native.run(executionMode == SLOW ? 1 : 12000, false);
             if (Native.state() != 0)
                 running = false;
             // Fast mode spends its time executing, not rebuilding inspector rows each batch.
@@ -119,6 +142,17 @@ public class MainActivity extends Activity {
         docsSize = prefs.getInt("docsSize", 15);
         executionMode = Math.max(SLOW, Math.min(FAST, prefs.getInt("executionMode", DEFAULT)));
         slowRate = Math.max(1, Math.min(30, prefs.getInt("slowRate", 5)));
+        try {
+            machine = MachineConfig.parse(new JSONObject(prefs.getString("machine", "")));
+        } catch (Exception e) {
+            machine = MachineConfig.preset(0);
+        }
+        configureNative();
+        prefs.edit().putString("machine", machine.encode()).apply();
+        if (state != null) {
+            pendingExport = state.getString("pendingExport", "");
+            pendingExportMessage = state.getString("pendingExportMessage", "Exported");
+        }
         project = prefs.getString("project", "Hello world");
         source = prefs.getString("draft", Native.example(0));
         boolean dark = (getResources().getConfiguration().uiMode &
@@ -155,8 +189,8 @@ public class MainActivity extends Activity {
         header.addView(logo);
         LinearLayout brand = col();
         brand.addView(text("ARM STUDIO", 18, ink));
-        brand.addView(text("A LITTLE MACHINE. ALL YOURS.", 9, muted));
-        header.addView(brand, new LinearLayout.LayoutParams(0, dp(64), 1));
+
+        header.addView(brand, new LinearLayout.LayoutParams(0, dp(48), 1));
         brand.setGravity(Gravity.CENTER_VERTICAL);
         Button more = button("•••", false);
         more.setContentDescription("Projects and settings");
@@ -170,7 +204,7 @@ public class MainActivity extends Activity {
         statusView = text("  Ready to make something.", 11, muted);
         statusView.setMaxLines(2);
         statusView.setGravity(Gravity.CENTER_VERTICAL);
-        statusRow.addView(statusView, new LinearLayout.LayoutParams(0, dp(36), 1));
+        statusRow.addView(statusView, new LinearLayout.LayoutParams(0, dp(30), 1));
         root.addView(statusRow);
         buildExecutionControls();
         body = col();
@@ -258,6 +292,14 @@ public class MainActivity extends Activity {
         return t;
     }
     void buildExecutionControls() {
+        controlsToggle = button("Run controls ▾", false);
+        controlsToggle.setContentDescription("Expand or collapse execution controls");
+        controlsToggle.setOnClickListener(v -> setControlsExpanded(!controlsExpanded));
+        root.addView(controlsToggle, new LinearLayout.LayoutParams(-1, dp(32)));
+        executionPanel = col();
+        executionPanel.setPadding(0, dp(8), 0, 0);
+        executionPanel.setVisibility(View.GONE);
+        root.addView(executionPanel);
         LinearLayout modes = row();
         String[] names = {"Slow", "Default", "Fast"};
         for (int n = 0; n < names.length; ++n) {
@@ -266,11 +308,11 @@ public class MainActivity extends Activity {
             b.setContentDescription(names[n] + " execution mode");
             b.setOnClickListener(v -> setExecutionMode(mode));
             modeButtons.add(b);
-            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(36), 1);
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(30), 1);
             p.setMargins(0, 0, dp(5), dp(10));
             modes.addView(b, p);
         }
-        root.addView(modes);
+        executionPanel.addView(modes);
         slowControls = col();
         speedLabel = text("", 11, muted);
         slowControls.addView(speedLabel);
@@ -292,8 +334,15 @@ public class MainActivity extends Activity {
             public void onStopTrackingTouch(SeekBar s) {}
         });
         slowControls.addView(speedSlider, new LinearLayout.LayoutParams(-1, dp(36)));
-        root.addView(slowControls);
+        executionPanel.addView(slowControls);
         updateExecutionControls();
+    }
+    void setControlsExpanded(boolean expanded) {
+        controlsExpanded = expanded;
+        executionPanel.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        if (editorTools != null)
+            editorTools.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        controlsToggle.setText(expanded ? "Run controls ▴" : "Run controls ▾");
     }
     void updateExecutionControls() {
         for (int n = 0; n < modeButtons.size(); ++n) {
@@ -325,7 +374,13 @@ public class MainActivity extends Activity {
     }
     void buildEditor() {
         editorPage = col();
-        projectTitle = section(project, "ARM64  /  .s     •     Local draft", editorPage);
+        LinearLayout projectRow = row();
+        projectRow.setGravity(Gravity.CENTER_VERTICAL);
+        projectTitle = text(project, 17, ink);
+        projectTitle.setSingleLine(true);
+        projectTitle.setEllipsize(TextUtils.TruncateAt.END);
+        projectRow.addView(projectTitle, new LinearLayout.LayoutParams(0, dp(48), 1));
+        editorPage.addView(projectRow);
         Button assemble = button("Assemble", false);
         assemble.setOnClickListener(v -> assemble());
         runButton = button("▶ Run", true);
@@ -337,8 +392,12 @@ public class MainActivity extends Activity {
         });
         Button step = button("Step →", false);
         step.setOnClickListener(v -> step());
-        controls(editorPage, assemble, runButton, step);
-        gap(editorPage, 12);
+        projectRow.addView(runButton, new LinearLayout.LayoutParams(dp(96), dp(36)));
+        editorTools = col();
+        controls(editorTools, assemble, step);
+        editorTools.setVisibility(controlsExpanded ? View.VISIBLE : View.GONE);
+        editorPage.addView(editorTools);
+        gap(editorPage, 6);
         LinearLayout codeCard = col();
         codeCard.setBackground(shape(surface, border, 14));
         codeCard.setClipToOutline(true);
@@ -603,7 +662,14 @@ public class MainActivity extends Activity {
     }
     void buildRun() {
         runPage = col();
-        section("The machine", "320 × 240    /    Native ARM64", runPage);
+        section(machine.name,
+                machine.width + " × " + machine.height + "    /    " + machine.types.length +
+                    " components",
+                runPage);
+        Button configure = button("Machine builder", false);
+        configure.setOnClickListener(v -> machineBuilder());
+        runPage.addView(configure, new LinearLayout.LayoutParams(-1, dp(36)));
+        gap(runPage, 8);
         Button reset = button("Reset", false);
         reset.setOnClickListener(v -> assemble());
         playButton = button("▶ Run", true);
@@ -628,12 +694,19 @@ public class MainActivity extends Activity {
         frame.setBackground(shape(Color.BLACK, border, 10));
         frame.setClipToOutline(true);
         inner.addView(frame, new LinearLayout.LayoutParams(-1, dp(260)));
+        frame.setVisibility(machine.has(1) || machine.has(2) || machine.has(3) ? View.VISIBLE
+                                                                               : View.GONE);
         gap(inner, 8);
-        inner.addView(text("Touch the display to send a single pointer.", 11, muted));
+        inner.addView(text(machine.has(5) ? "Touch the display · up to 10 contacts"
+                                          : "Add a touch controller to receive touch input",
+                           11, muted));
         gap(inner, 16);
+        keyboardPanel = col();
+        keyboardPanel.setVisibility(machine.has(6) ? View.VISIBLE : View.GONE);
+        inner.addView(keyboardPanel);
         TextView keys = text("VIRTUAL KEYBOARD", 10, muted);
-        inner.addView(keys);
-        gap(inner, 8);
+        keyboardPanel.addView(keys);
+        gap(keyboardPanel, 8);
         for (String letters : new String[] {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"}) {
             LinearLayout r = row();
             for (char c : letters.toCharArray()) {
@@ -642,7 +715,7 @@ public class MainActivity extends Activity {
                 p.setMargins(0, 0, dp(3), dp(4));
                 r.addView(b, p);
             }
-            inner.addView(r);
+            keyboardPanel.addView(r);
         }
         LinearLayout r = row();
         String[] labels = {"Esc", "←", "↑", "↓", "→", "Space", "↵", "⌫"};
@@ -654,7 +727,7 @@ public class MainActivity extends Activity {
             p.setMargins(0, 0, dp(3), 0);
             r.addView(b, p);
         }
-        inner.addView(r);
+        keyboardPanel.addView(r);
         gap(inner, 18);
         inner.addView(text("CONSOLE", 10, muted));
         gap(inner, 8);
@@ -694,11 +767,12 @@ public class MainActivity extends Activity {
     }
     void sendInput() {
         Native.input(key, keyDown, touchX, touchY, touchDown);
+        Native.touches(touchContacts);
     }
     class FrameView extends View {
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        Bitmap bitmap = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
-        int[] data = new int[1200];
+        Bitmap bitmap = Bitmap.createBitmap(machine.width, machine.height, Bitmap.Config.ARGB_8888);
+        int[] data = new int[machine.width / 8 * (machine.height / 8)];
         int mode = 0, primary = -1;
         final int[] palette = {0xff101518, 0xffcc545d, 0xff5dbb83, 0xffd5bb65,
                                0xff658bd6, 0xffb37dd2, 0xff61bfc7, 0xffd1ddd6,
@@ -706,24 +780,25 @@ public class MainActivity extends Activity {
                                0xff91b5ff, 0xffdeb2f5, 0xff9fe8ea, 0xfff5fff7};
         FrameView() {
             super(MainActivity.this);
-            setContentDescription("VM framebuffer, 320 by 240. Touch to send coordinates.");
+            setContentDescription("VM framebuffer, " + machine.width + " by " + machine.height +
+                                  ". Touch to send coordinates.");
         }
         void update() {
             mode = Native.mode();
             data = Native.frame();
             if (mode != 0)
-                bitmap.setPixels(data, 0, 320, 0, 0, 320, 240);
+                bitmap.setPixels(data, 0, machine.width, 0, 0, machine.width, machine.height);
             invalidate();
         }
         @Override
         protected void onMeasure(int w, int h) {
             int width = MeasureSpec.getSize(w);
-            setMeasuredDimension(width, width * 3 / 4);
+            setMeasuredDimension(width, width * machine.height / machine.width);
         }
         @Override
         protected void onDraw(Canvas c) {
             c.save();
-            c.scale(getWidth() / 320f, getHeight() / 240f);
+            c.scale(getWidth() / (float)machine.width, getHeight() / (float)machine.height);
             c.drawColor(palette[0]);
             if (mode == 0) {
                 paint.setTypeface(Typeface.MONOSPACE);
@@ -731,7 +806,7 @@ public class MainActivity extends Activity {
                 paint.setTextAlign(Paint.Align.LEFT);
                 for (int j = 0; j < data.length; j++) {
                     int cell = data[j], ch = cell & 255;
-                    float x = (j % 40) * 8, y = (j / 40) * 8;
+                    float x = (j % (machine.width / 8)) * 8, y = (j / (machine.width / 8)) * 8;
                     paint.setColor(palette[(cell >> 16) & 15]);
                     c.drawRect(x, y, x + 8, y + 8, paint);
                     if (ch >= 32 && ch < 127) {
@@ -755,8 +830,10 @@ public class MainActivity extends Activity {
             }
             int idx = e.findPointerIndex(primary);
             if (idx >= 0) {
-                touchX = Math.max(0, Math.min(319, (int)(e.getX(idx) * 320 / getWidth())));
-                touchY = Math.max(0, Math.min(239, (int)(e.getY(idx) * 240 / getHeight())));
+                touchX = Math.max(0, Math.min(machine.width - 1,
+                                              (int)(e.getX(idx) * machine.width / getWidth())));
+                touchY = Math.max(0, Math.min(machine.height - 1,
+                                              (int)(e.getY(idx) * machine.height / getHeight())));
             }
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL ||
                 (action == MotionEvent.ACTION_POINTER_UP &&
@@ -766,6 +843,22 @@ public class MainActivity extends Activity {
                 performClick();
             }
             sendInput();
+            ArrayList<Integer> contacts = new ArrayList<>();
+            if (action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL) {
+                for (int n = 0; n < Math.min(10, e.getPointerCount()); ++n) {
+                    if (action == MotionEvent.ACTION_POINTER_UP && n == e.getActionIndex())
+                        continue;
+                    contacts.add(e.getPointerId(n));
+                    contacts.add(
+                        Math.max(0, Math.min(machine.width - 1,
+                                             (int)(e.getX(n) * machine.width / getWidth()))));
+                    contacts.add(
+                        Math.max(0, Math.min(machine.height - 1,
+                                             (int)(e.getY(n) * machine.height / getHeight()))));
+                }
+            }
+            touchContacts = contacts.stream().mapToInt(Integer::intValue).toArray();
+            Native.touches(touchContacts);
             return true;
         }
         @Override
@@ -842,7 +935,7 @@ public class MainActivity extends Activity {
                 address.setText(String.format(Locale.ROOT, "0x%08X", a));
                 refresh();
             });
-            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(36), 1);
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(30), 1);
             p.rightMargin = dp(4);
             jumps.addView(b, p);
         }
@@ -986,14 +1079,17 @@ public class MainActivity extends Activity {
                 heading.setTypeface(null, Typeface.BOLD);
                 heading.setPadding(dp(4), dp(16), dp(4), dp(12));
                 manualContent.addView(heading);
-                for (String paragraph : section[1].split("\\n\\n")) {
+                for (String paragraph :
+                     section[1].split(section[0].equals("Virtual components")
+                                          ? "\\n\\n(?=MACHINE BUILDER|DISCOVERY TABLE|[1-9] · )"
+                                          : "\\n\\n")) {
                     if (!titleMatch && !paragraph.toLowerCase(Locale.ROOT).contains(query))
                         continue;
                     // Address maps, VM calls and example lists become individually readable
                     // entries.
                     for (String entry :
-                         paragraph.split("\\n(?=0x|#[0-5]  |Hello world:|Color field:|Touch " +
-                                         "canvas:|Keyboard echo:|Float & stack:|Animation:)")) {
+                         paragraph.split("\\n(?=0x|#[0-5]  |Hello world:|Color field:|Touch "
+                                         + "canvas:|Keyboard echo:|Float & stack:|Animation:)")) {
                         LinearLayout card = col();
                         card.setPadding(dp(14), dp(12), dp(14), dp(12));
                         card.setBackground(shape(surface, border, 12));
@@ -1030,10 +1126,12 @@ public class MainActivity extends Activity {
             }
             public void afterTextChanged(Editable e) {}
         });
+        final int[] previousTopic = {manualTopics.getSelectedItemPosition()};
         manualTopics.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (manualSearch.length() > 0)
+                if (position != previousTopic[0] && manualSearch.length() > 0)
                     manualSearch.setText("");
+                previousTopic[0] = position;
                 render.run();
             }
             public void onNothingSelected(AdapterView<?> parent) {}
@@ -1133,6 +1231,8 @@ public class MainActivity extends Activity {
     }
     void showTab(int n) {
         tab = n;
+        controlsToggle.setVisibility(n == 3 ? View.GONE : View.VISIBLE);
+        executionPanel.setVisibility(n != 3 && controlsExpanded ? View.VISIBLE : View.GONE);
         body.removeAllViews();
         body.addView(new View[] {editorPage, runPage, inspectPage, guidePage}[n],
                      new LinearLayout.LayoutParams(-1, -1));
@@ -1210,13 +1310,16 @@ public class MainActivity extends Activity {
             gutter.invalidate();
         if (tab == 1 && frame != null) {
             frame.update();
-            modeLabel.setText(new String[] {"TEXT  /  40 × 30 CELLS", "RGB565  /  320 × 240",
-                                            "RGB888  /  320 × 240"}[Native.mode()]);
+            modeLabel.setText(Native.mode() == 0
+                                  ? "TEXT  /  " + (machine.width / 8) + " × " +
+                                        (machine.height / 8) + " CELLS"
+                                  : (Native.mode() == 1 ? "RGB565" : "RGB888") + "  /  " +
+                                        machine.width + " × " + machine.height);
             String out = Native.output();
             if (!out.equals(consoleRaw)) {
                 consoleRaw = out;
-                console.setText(out.isEmpty() ? "Output appears here." :
-                                      out.replaceAll("\u001B\\[[0-9;]*[A-Za-z]", ""));
+                console.setText(out.isEmpty() ? "Output appears here."
+                                              : out.replaceAll("\u001B\\[[0-9;]*[A-Za-z]", ""));
             }
         }
         if (tab == 2 && memoryView != null) {
@@ -1240,9 +1343,8 @@ public class MainActivity extends Activity {
         inspectorLine = 0;
         instructionHeading.setText("Running · pause to inspect");
         instructionRows.removeAllViews();
-        TextView note =
-            text("Registers, memory and instructions appear here when the program pauses", 12,
-                 muted);
+        TextView note = text(
+            "Registers, memory and instructions appear here when the program pauses", 12, muted);
         note.setPadding(dp(14), dp(8), 0, dp(8));
         instructionRows.addView(note);
         memoryView.setText("Hidden while running in fast mode");
@@ -1250,8 +1352,8 @@ public class MainActivity extends Activity {
     }
     void menu(View anchor) {
         PopupMenu p = new PopupMenu(this, anchor);
-        String[] actions = {"Examples",  "Save project", "Open project",
-                            "Export .s", "Import .s",    "Settings"};
+        String[] actions = {"Examples", "Machine builder", "Save project", "Open project",
+                            "Export…",  "Import…",         "Settings"};
         for (String a : actions)
             p.getMenu().add(a);
         p.setOnMenuItemClickListener(item -> {
@@ -1259,7 +1361,7 @@ public class MainActivity extends Activity {
             case "Examples":
                 new AlertDialog.Builder(this)
                     .setTitle("Example projects")
-                    .setItems(examples, (d, n) -> loadProject(examples[n], Native.example(n)))
+                    .setItems(examples, (d, n) -> selectExample(n))
                     .show();
                 break;
             case "Save project":
@@ -1268,18 +1370,17 @@ public class MainActivity extends Activity {
             case "Open project":
                 openProject();
                 break;
-            case "Export .s":
-                Intent export = new Intent(Intent.ACTION_CREATE_DOCUMENT)
-                                    .setType("text/plain")
-                                    .addCategory(Intent.CATEGORY_OPENABLE)
-                                    .putExtra(Intent.EXTRA_TITLE, project + ".s");
-                startActivityForResult(export, 10);
+            case "Machine builder":
+                machineBuilder();
                 break;
-            case "Import .s":
-                Intent imp = new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                                 .setType("*/*")
-                                 .addCategory(Intent.CATEGORY_OPENABLE);
-                startActivityForResult(imp, 11);
+            case "Export…":
+                exportProject();
+                break;
+            case "Import…":
+                startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                                           .setType("*/*")
+                                           .addCategory(Intent.CATEGORY_OPENABLE),
+                                       11);
                 break;
             case "Settings":
                 settings();
@@ -1307,6 +1408,7 @@ public class MainActivity extends Activity {
                                    project = n;
                                    prefs.edit()
                                        .putString("saved:" + n, editor.getText().toString())
+                                       .putString("savedMachine:" + n, machine.encode())
                                        .putString("project", n)
                                        .apply();
                                    projectTitle.setText(n);
@@ -1332,11 +1434,22 @@ public class MainActivity extends Activity {
             .show();
     }
     void loadProject(String name, String code) {
+        MachineConfig target = machine;
+        try {
+            target =
+                MachineConfig.parse(new JSONObject(prefs.getString("savedMachine:" + name, "")));
+        } catch (Exception ignored) {
+        }
+        loadProject(name, code, target);
+    }
+    void loadProject(String name, String code, MachineConfig target) {
         pause();
-        if (!editor.getText().toString().equals(code))
+        if (!editor.getText().toString().equals(code) || !machine.encode().equals(target.encode()))
             prefs.edit()
                 .putString("saved:Autosave — " + project, editor.getText().toString())
+                .putString("savedMachine:Autosave — " + project, machine.encode())
                 .apply();
+        applyMachine(target);
         project = name;
         editor.setText(code);
         editor.setSelection(0);
@@ -1345,6 +1458,209 @@ public class MainActivity extends Activity {
         dirty = true;
         breakpoints.clear();
         showTab(0);
+    }
+    void configureNative() {
+        String result = Native.configure(
+            machine.width, machine.height, machine.types,
+            new File(getFilesDir(), "nv-" + machine.id + ".bin").getAbsolutePath());
+        if (!result.isEmpty())
+            throw new IllegalArgumentException(result);
+    }
+    void applyMachine(MachineConfig config) {
+        pause();
+        machine = config;
+        configureNative();
+        keyDown = touchDown = false;
+        touchContacts = new int[0];
+        dirty = true;
+        prefs.edit().putString("machine", machine.encode()).apply();
+        if (runPage != null) {
+            buildRun();
+            if (tab == 1)
+                showTab(1);
+        }
+        if (editor != null) {
+            generation++;
+            handler.removeCallbacks(lintTask);
+            handler.postDelayed(lintTask, 150);
+        }
+        refresh();
+    }
+    void selectExample(int n) {
+        MachineConfig config = MachineConfig.preset(0);
+        config.id =
+            UUID.nameUUIDFromBytes(("armstudio-example-" + n).getBytes(StandardCharsets.UTF_8))
+                .toString();
+        if (n >= 6 && n <= 8)
+            config.types = new int[] {n - 5, 4, 5, 6, 7, 8, 9};
+        if (n == 15)
+            config.types = new int[] {3, 4, 5, 6, 7, 8, 9};
+        loadProject(examples[n], Native.example(n), config);
+    }
+    void machineBuilder() {
+        pause();
+        LinearLayout content = col();
+        content.setPadding(dp(20), dp(8), dp(20), dp(12));
+        content.addView(text("Build your virtual computer", 18, ink));
+        gap(content, 10);
+        Spinner preset = new Spinner(this);
+        setupSpinner(preset, new String[] {"Default · 320 × 240 + keyboard",
+                                           "Phone · 320 × 640, touch only", "Custom"});
+        preset.setContentDescription("Machine environment");
+        content.addView(preset, new LinearLayout.LayoutParams(-1, dp(44)));
+        LinearLayout dimensions = row();
+        EditText width = new EditText(this), height = new EditText(this);
+        width.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        height.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        width.setHint("Width");
+        height.setHint("Height");
+        width.setContentDescription("Display width in pixels");
+        height.setContentDescription("Display height in pixels");
+        width.setText(String.valueOf(machine.width));
+        height.setText(String.valueOf(machine.height));
+        dimensions.addView(width, new LinearLayout.LayoutParams(0, dp(52), 1));
+        dimensions.addView(height, new LinearLayout.LayoutParams(0, dp(52), 1));
+        content.addView(dimensions);
+        content.addView(text("Multiples of 8 · width 160–640 · height 120–960", 11, muted));
+        gap(content, 14);
+        content.addView(text("COMPONENTS", 11, accent));
+        CheckBox[] checks = new CheckBox[9];
+        for (int n = 0; n < 9; ++n) {
+            CheckBox check = new CheckBox(this);
+            check.setText(MachineConfig.COMPONENTS[n]);
+            check.setTextSize(13);
+            check.setTextColor(ink);
+            check.setChecked(machine.has(n + 1));
+            content.addView(check, new LinearLayout.LayoutParams(-1, dp(44)));
+            checks[n] = check;
+        }
+        gap(content, 10);
+        content.addView(text(
+            "Applying resets the running machine and keeps your code. Devices are "
+                + "discovered through DEVICE_TABLE; see Guide → VM manual → Virtual components.",
+            12, muted));
+        TextView validation = text("", 12, error);
+        content.addView(validation);
+        preset.setSelection(machine.name.equals("Default") ? 0
+                            : machine.name.equals("Phone") ? 1
+                                                           : 2);
+        // Ignore Spinner's initial callback so an edited configuration stays intact on opening.
+        final boolean[] initial = {true};
+        preset.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(AdapterView<?> p, View v, int n, long id) {
+                if (initial[0]) {
+                    initial[0] = false;
+                    return;
+                }
+                if (n < 2) {
+                    MachineConfig m = MachineConfig.preset(n);
+                    width.setText(String.valueOf(m.width));
+                    height.setText(String.valueOf(m.height));
+                    for (int i = 0; i < 9; ++i)
+                        checks[i].setChecked(m.has(i + 1));
+                }
+            }
+            public void onNothingSelected(AdapterView<?> p) {}
+        });
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                                 .setTitle("Machine builder")
+                                 .setView(scroll)
+                                 .setNegativeButton("Cancel", null)
+                                 .setPositiveButton("Apply", null)
+                                 .create();
+        machineDialog = dialog;
+        dialog.setOnShowListener(
+            ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                try {
+                    MachineConfig config = machine.copy();
+                    config.width = Integer.parseInt(width.getText().toString());
+                    config.height = Integer.parseInt(height.getText().toString());
+                    ArrayList<Integer> types = new ArrayList<>();
+                    for (int n = 0; n < 9; ++n)
+                        if (checks[n].isChecked())
+                            types.add(n + 1);
+                    config.types = types.stream().mapToInt(Integer::intValue).toArray();
+                    int selected = preset.getSelectedItemPosition();
+                    MachineConfig standard = MachineConfig.preset(selected);
+                    config.name = selected < 2 && config.width == standard.width &&
+                                          config.height == standard.height &&
+                                          Arrays.equals(config.types, standard.types)
+                                      ? standard.name
+                                      : "Custom";
+                    MachineConfig.parse(config.json());
+                    applyMachine(config);
+                    dialog.dismiss();
+                    toast("Machine configured · assemble to run");
+                } catch (Exception e) {
+                    validation.setText(e.getMessage() == null ? "Enter valid display dimensions"
+                                                              : e.getMessage());
+                }
+            }));
+        dialog.show();
+    }
+    String bundlePayload() throws JSONException {
+        return new JSONObject()
+            .put("format", "armstudio-project")
+            .put("version", 1)
+            .put("name", project)
+            .put("code", editor.getText().toString())
+            .put("machine", machine.json())
+            .toString(2);
+    }
+    void exportProject() {
+        new AlertDialog.Builder(this)
+            .setTitle("Export")
+            .setItems(
+                new String[] {"Code only · .s", "Machine only · .armmachine",
+                              "Bundled project · .armproject"},
+                (d, n) -> {
+                    try {
+                        pause();
+                        pendingExport = n == 0   ? editor.getText().toString()
+                                        : n == 1 ? machine.encode()
+                                                 : bundlePayload();
+                        String extension = n == 0 ? ".s" : n == 1 ? ".armmachine" : ".armproject";
+                        pendingExportMessage = n == 0   ? "Exported source"
+                                               : n == 1 ? "Exported machine"
+                                                        : "Exported bundled project";
+                        startActivityForResult(
+                            new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                                .setType(n == 0 ? "text/plain" : "application/json")
+                                .addCategory(Intent.CATEGORY_OPENABLE)
+                                .putExtra(Intent.EXTRA_TITLE,
+                                          (n == 1 ? machine.name : project) + extension),
+                            10);
+                    } catch (Exception e) {
+                        toast("Export failed: " + e.getMessage());
+                    }
+                })
+            .show();
+    }
+    void importPayload(String payload) throws Exception {
+        if (payload.trim().startsWith("{")) {
+            JSONObject object = new JSONObject(payload);
+            String format = object.getString("format");
+            if (format.equals("armstudio-machine")) {
+                applyMachine(MachineConfig.parse(object));
+                toast("Imported machine · source kept");
+            } else if (format.equals("armstudio-project") && object.getInt("version") == 1) {
+                MachineConfig config = MachineConfig.parse(object.getJSONObject("machine"));
+                String code = object.getString("code"), name = object.getString("name");
+                if (code.getBytes(StandardCharsets.UTF_8).length > 256 * 1024 ||
+                    name.length() > 120 || name.trim().isEmpty())
+                    throw new IOException("Invalid project name or source exceeds 256 KiB");
+                loadProject(name, code, config);
+                toast("Imported bundled project");
+            } else
+                throw new IOException("Unsupported project format or version");
+        } else {
+            if (payload.getBytes(StandardCharsets.UTF_8).length > 256 * 1024)
+                throw new IOException("Source exceeds 256 KiB");
+            loadProject("Imported program", payload, machine);
+            toast("Imported source");
+        }
     }
     void settings() {
         LinearLayout content = col();
@@ -1404,21 +1720,22 @@ public class MainActivity extends Activity {
             return;
         try {
             if (request == 10) {
-                try (OutputStream out = getContentResolver().openOutputStream(data.getData())) {
-                    out.write(editor.getText().toString().getBytes(StandardCharsets.UTF_8));
+                try (OutputStream out =
+                         getContentResolver().openOutputStream(data.getData(), "wt")) {
+                    out.write(pendingExport.getBytes(StandardCharsets.UTF_8));
                 }
-                toast("Exported assembly source");
+                toast(pendingExportMessage);
             } else if (request == 11) {
                 try (InputStream in = getContentResolver().openInputStream(data.getData());
                      ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                     byte[] buffer = new byte[4096];
                     int n;
                     while ((n = in.read(buffer)) != -1) {
-                        if (out.size() + n > 256 * 1024)
-                            throw new IOException("Source exceeds 256 KiB");
+                        if (out.size() + n > 2 * 1024 * 1024)
+                            throw new IOException("Import exceeds 2 MiB");
                         out.write(buffer, 0, n);
                     }
-                    loadProject("Imported program", out.toString("UTF-8"));
+                    importPayload(out.toString("UTF-8"));
                 }
             }
         } catch (Exception ex) {
@@ -1426,13 +1743,23 @@ public class MainActivity extends Activity {
         }
     }
     void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+        if (currentToast != null)
+            currentToast.cancel();
+        currentToast = Toast.makeText(this, s, Toast.LENGTH_LONG);
+        currentToast.show();
+    }
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        state.putString("pendingExport", pendingExport);
+        state.putString("pendingExportMessage", pendingExportMessage);
     }
     @Override
     protected void onPause() {
         super.onPause();
         pause();
         keyDown = touchDown = false;
+        touchContacts = new int[0];
         sendInput();
         if (editor != null)
             prefs.edit()

@@ -64,6 +64,17 @@ public class SmokeInstrumentation extends Instrumentation {
             }
         return null;
     }
+    android.widget.Spinner findSpinner(View view) {
+        if (view instanceof android.widget.Spinner)
+            return (android.widget.Spinner)view;
+        if (view instanceof ViewGroup)
+            for (int n = 0; n < ((ViewGroup)view).getChildCount(); ++n) {
+                android.widget.Spinner found = findSpinner(((ViewGroup)view).getChildAt(n));
+                if (found != null)
+                    return found;
+            }
+        return null;
+    }
     String allText(View view) {
         StringBuilder result = new StringBuilder();
         if (view instanceof TextView)
@@ -74,6 +85,12 @@ public class SmokeInstrumentation extends Instrumentation {
         return result.toString();
     }
     void capture(String name) throws Exception {
+        main(() -> {
+            if (activity.currentToast != null)
+                activity.currentToast.cancel();
+        });
+        Thread.sleep(400);
+        waitForIdleSync();
         Bitmap bitmap = getUiAutomation().takeScreenshot();
         if (bitmap != null)
             try (FileOutputStream out = getTargetContext().openFileOutput(name, 0)) {
@@ -95,7 +112,12 @@ public class SmokeInstrumentation extends Instrumentation {
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             activity = (MainActivity)startActivitySync(intent);
             waitForIdle();
-            main(() -> activity.setExecutionMode(MainActivity.DEFAULT));
+            main(() -> {
+                MachineConfig isolated = MachineConfig.preset(0);
+                isolated.id = "instrumentation-v3";
+                activity.applyMachine(isolated);
+                activity.setExecutionMode(MainActivity.DEFAULT);
+            });
             source(Native.example(0));
             main(() -> {
                 activity.runButton.performClick();
@@ -316,8 +338,8 @@ public class SmokeInstrumentation extends Instrumentation {
             main(() -> {
                 activity.showTab(3);
                 findButton(activity.guidePage, "VM manual").performClick();
-                check(activity.manualTopics.getCount() == 12,
-                      "Manual provides eleven topics and all-topics view");
+                check(activity.manualTopics.getCount() == 13,
+                      "Manual provides twelve topics and all-topics view");
                 activity.manualTopics.setSelection(5);
             });
             waitForIdle();
@@ -354,6 +376,170 @@ public class SmokeInstrumentation extends Instrumentation {
                 check(prefs.getString("saved:Autosave — Smoke test draft", "").equals("nop\n"),
                       "Switching projects preserves assembled unsaved source");
             });
+            main(() -> {
+                check(activity.executionPanel.getVisibility() == View.GONE &&
+                          activity.editorTools.getVisibility() == View.GONE,
+                      "Execution controls collapse to give the editor more space");
+                activity.setControlsExpanded(true);
+                check(activity.executionPanel.getVisibility() == View.VISIBLE &&
+                          activity.editorTools.getVisibility() == View.VISIBLE,
+                      "Controls can be expanded");
+                activity.setControlsExpanded(false);
+                activity.machineBuilder();
+            });
+            waitForIdle();
+            main(() -> {
+                android.widget.Spinner preset =
+                    findSpinner(activity.machineDialog.getWindow().getDecorView());
+                check(preset != null, "Machine builder exposes environments");
+                preset.setSelection(1);
+            });
+            waitForIdle();
+            main(() -> {
+                activity.machineDialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
+                    .performClick();
+                check(activity.machine.name.equals("Phone") && activity.machine.width == 320 &&
+                          activity.machine.height == 640,
+                      "Phone preset configures a taller display");
+                check(!activity.machine.has(6) &&
+                          activity.keyboardPanel.getVisibility() == View.GONE,
+                      "Phone environment omits virtual keyboard");
+                check(activity.editor.getText().toString().equals(Native.example(0)),
+                      "Builder preserves source");
+                activity.setExecutionMode(MainActivity.FAST);
+                activity.start(true);
+            });
+            waitForIdle();
+            main(() -> {
+                check(activity.frame.data.length == 3200, "Phone text display uses all 80 rows");
+                check(activity.frame.getHeight() == activity.frame.getWidth() * 2,
+                      "Phone display has tall aspect ratio");
+                check(Native.output().contains("Hello, ARM64!"),
+                      "Hello world works on phone environment");
+            });
+            capture("v3-phone.png");
+            final String[] bundled = new String[1];
+            final String[] machineOnly = new String[1];
+            main(() -> {
+                activity.pause();
+                activity.project = "V3 round trip";
+                activity.editor.setText("mov x0, #42\nhlt #0\n");
+                machineOnly[0] = activity.machine.encode();
+                bundled[0] = activity.bundlePayload();
+                java.io.File file =
+                    new java.io.File(activity.getCacheDir(), "v3-export.armproject");
+                activity.pendingExport = bundled[0];
+                activity.pendingExportMessage = "Export test";
+                Intent document = new Intent().setData(android.net.Uri.fromFile(file));
+                activity.onActivityResult(10, Activity.RESULT_OK, document);
+                String written = new String(java.nio.file.Files.readAllBytes(file.toPath()),
+                                            java.nio.charset.StandardCharsets.UTF_8);
+                check(written.equals(bundled[0]),
+                      "Document export writes the exact bundled project");
+                MachineConfig changed = MachineConfig.preset(0);
+                changed.id = "instrumentation-v3";
+                activity.applyMachine(changed);
+                activity.editor.setText("nop\n");
+                activity.onActivityResult(11, Activity.RESULT_OK, document);
+                check(activity.machine.height == 640 && activity.project.equals("V3 round trip") &&
+                          activity.editor.getText().toString().contains("#42"),
+                      "Document import restores code, name and machine");
+                file.delete();
+                activity.editor.setText("nop\n");
+                activity.importPayload(machineOnly[0]);
+                check(activity.machine.height == 640 &&
+                          activity.editor.getText().toString().equals("nop\n"),
+                      "Machine-only import preserves code");
+                activity.importPayload("mov x0, #3\n");
+                check(activity.machine.height == 640 &&
+                          activity.editor.getText().toString().contains("#3"),
+                      "Code-only import preserves machine");
+                String before = activity.machine.encode();
+                boolean invalid = false;
+                try {
+                    activity.importPayload(
+                        machineOnly[0].replace("\"width\": 320", "\"width\": 319"));
+                } catch (Exception expected) {
+                    invalid = true;
+                }
+                check(invalid && activity.machine.encode().equals(before),
+                      "Invalid machine imports do not change current machine");
+                activity.importPayload(bundled[0]);
+            });
+            main(() -> {
+                // Apply a custom device configuration and exercise graphics through actual Run.
+                MachineConfig custom = MachineConfig.preset(2);
+                custom.id = "instrumentation-v3";
+                custom.width = 400;
+                custom.height = 320;
+                custom.types = new int[] {2, 4, 5, 7, 8, 9};
+                activity.applyMachine(custom);
+                activity.editor.setText(Native.example(7));
+                activity.start(true);
+            });
+            waitForIdle();
+            main(() -> {
+                check(Native.state() == 2 && !Native.status().startsWith("Fault"),
+                      "Basic GPU demo finishes through UI");
+                check(activity.frame.data.length == 400 * 320 &&
+                          activity.frame.data[80 * 400 + 80] == 0xffff6688,
+                      "Custom display renders sprite graphics");
+            });
+            capture("v3-tiles.png");
+            main(() -> {
+                MachineConfig custom = activity.machine.copy();
+                custom.types = new int[] {3, 4, 5, 7, 8, 9};
+                activity.applyMachine(custom);
+                activity.editor.setText(Native.example(8));
+                activity.start(true);
+            });
+            waitForIdle();
+            main(() -> {
+                check(Native.state() == 2 && activity.frame.data[160 * 400 + 200] != 0xff132030,
+                      "Advanced GPU colored and textured triangles render through UI");
+                activity.showTab(3);
+                findButton(activity.guidePage, "VM manual").performClick();
+                activity.manualSearch.setText("perspective-correct");
+                check(allText(activity.manualContent).contains("ADVANCED GPU"),
+                      "New component ABI is searchable offline");
+            });
+            waitForIdle();
+            main(()
+                     -> check(
+                         activity.manualSearch.getText().toString().equals("perspective-correct") &&
+                             allText(activity.manualContent).contains("ADVANCED GPU"),
+                         "Initial topic callback preserves an entered search"));
+            capture("v3-components.png");
+            main(() -> activity.showTab(1));
+            capture("v3-3d.png");
+            main(() -> activity.showTab(0));
+            capture("v3-editor.png");
+            final int[][] cubeFrames = new int[2][];
+            main(() -> {
+                activity.setExecutionMode(MainActivity.FAST);
+                activity.selectExample(15);
+                check(activity.project.equals("Spinning cube · Advanced GPU") &&
+                          activity.machine.has(3) && !activity.machine.has(1),
+                      "Spinning cube example attaches an Advanced GPU");
+                activity.start(true);
+            });
+            Thread.sleep(200);
+            main(() -> {
+                check(activity.running && Native.state() == 0 && Native.mode() == 2,
+                      "Spinning cube runs continuously in graphics mode");
+                cubeFrames[0] = activity.frame.data.clone();
+            });
+            Thread.sleep(300);
+            main(() -> {
+                cubeFrames[1] = activity.frame.data.clone();
+                check(!java.util.Arrays.equals(cubeFrames[0], cubeFrames[1]),
+                      "Cube visibly spins across displayed frames");
+                activity.pauseAndInspect();
+                check(!activity.running && activity.tab == 2 && Native.state() == 1,
+                      "Spinning cube pauses into the inspector");
+                activity.showTab(1);
+            });
+            capture("spinning-cube.png");
             result.putString("stream", "\nPASS: " + checks + " UI integration checks\n");
         } catch (Throwable e) {
             result.putString("stream", "\nFAIL after " + checks + " UI checks: " +

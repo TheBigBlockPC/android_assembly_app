@@ -22,6 +22,13 @@ native_template_start:
     stp d10, d11, [sp, #128]
     stp d12, d13, [sp, #144]
     stp d14, d15, [sp, #160]
+    ldr x1, [x0, #536]
+    str x1, [sp, #224]
+    str xzr, [sp, #248]
+    ldr x1, [x0, #520]
+    str x1, [sp, #232]
+    ldr x1, [x0, #528]
+    str x1, [sp, #240]
     mrs x1, fpcr
     mrs x2, fpsr
     stp x1, x2, [sp, #208]
@@ -101,6 +108,12 @@ native_template_op:
     stp d26, d27, [x30, #464]
     stp d28, d29, [x30, #480]
     stp d30, d31, [x30, #496]
+    ldr x0, [sp, #248]
+    str x0, [x30, #512]
+    ldr x0, [sp, #232]
+    str x0, [x30, #520]
+    ldr x0, [sp, #240]
+    str x0, [x30, #528]
     ldp x19, x20, [sp, #0]
     ldp x21, x22, [sp, #16]
     ldp x23, x24, [sp, #32]
@@ -118,4 +131,35 @@ native_template_op:
     add sp, sp, #256
     ret
 native_template_end:
+// Fast block checkpoint. x16/x17 and NZCV are restored on either path.
+.global fast_checkpoint_start, fast_checkpoint_pc, fast_checkpoint_length
+.global fast_checkpoint_exit, fast_checkpoint_add, fast_checkpoint_last, fast_checkpoint_end
+.hidden fast_checkpoint_start, fast_checkpoint_pc, fast_checkpoint_length
+.hidden fast_checkpoint_exit, fast_checkpoint_add, fast_checkpoint_last, fast_checkpoint_end
+fast_checkpoint_start:
+    stp x16, x17, [sp, #192]
+    mrs x16, nzcv
+    str x16, [sp, #176]
+fast_checkpoint_pc:
+    movz x16, #0
+    str x16, [sp, #232]
+    ldr x16, [sp, #224]
+fast_checkpoint_length:
+    subs x16, x16, #0
+fast_checkpoint_exit:
+    b.hs 1f
+    b fast_checkpoint_end
+1:
+    str x16, [sp, #224]
+    ldr x16, [sp, #248]
+fast_checkpoint_add:
+    add x16, x16, #0
+    str x16, [sp, #248]
+fast_checkpoint_last:
+    movz x16, #0
+    str x16, [sp, #240]
+    ldr x16, [sp, #176]
+    msr nzcv, x16
+    ldp x16, x17, [sp, #192]
+fast_checkpoint_end:
 .section .note.GNU-stack,"",%progbits
